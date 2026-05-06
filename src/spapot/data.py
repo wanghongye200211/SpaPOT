@@ -15,11 +15,11 @@ from .utils import write_json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-JOINTAE_SRC = PROJECT_ROOT / "src"
-if str(JOINTAE_SRC) not in sys.path:
-    sys.path.insert(0, str(JOINTAE_SRC))
+EMBEDDING_SRC = PROJECT_ROOT / "src"
+if str(EMBEDDING_SRC) not in sys.path:
+    sys.path.insert(0, str(EMBEDDING_SRC))
 
-from stvcr_jointae.preprocessing.gene_prior_gatae import (  # noqa: E402
+from embedding.preprocessing.gene_prior_gatae import (  # noqa: E402
     GenePriorGATConfig,
     train_gene_prior_gatae,
 )
@@ -101,7 +101,7 @@ class SampledSlice:
 def ensure_gat_embedding(config: DataConfig) -> tuple[Path, Path]:
     config.gat_out_dir.mkdir(parents=True, exist_ok=True)
     latent_h5ad = config.gat_out_dir / f"dorsal_midbrain_gene_prior_gatae_{config.gat_latent_dim}d_latent.h5ad"
-    ready_h5ad = config.gat_out_dir / f"dorsal_midbrain_gene_prior_gatae_{config.gat_latent_dim}d_stvcr_ready.h5ad"
+    ready_h5ad = config.gat_out_dir / f"dorsal_midbrain_gene_prior_gatae_{config.gat_latent_dim}d_spapot_ready.h5ad"
     checkpoint = config.gat_out_dir / f"gene_prior_gatae_{config.gat_latent_dim}d.pt"
     summary = config.gat_out_dir / f"dorsal_midbrain_gene_prior_gatae_{config.gat_latent_dim}d.summary.json"
     trace = config.gat_out_dir / f"dorsal_midbrain_gene_prior_gatae_{config.gat_latent_dim}d.training_trace.jsonl"

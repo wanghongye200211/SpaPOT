@@ -25,11 +25,11 @@ from .utils import append_jsonl, clear_cache, seed_all
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-JOINTAE_SRC = PROJECT_ROOT / "src"
-if str(JOINTAE_SRC) not in sys.path:
-    sys.path.insert(0, str(JOINTAE_SRC))
+EMBEDDING_SRC = PROJECT_ROOT / "src"
+if str(EMBEDDING_SRC) not in sys.path:
+    sys.path.insert(0, str(EMBEDDING_SRC))
 
-from stvcr_jointae.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder  # noqa: E402
+from embedding.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder  # noqa: E402
 
 
 @dataclass

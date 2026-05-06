@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from stvcr_jointae.preprocessing.gene_prior_gatae import GenePriorGATConfig, load_gene_prior_gatae_decoder
+from embedding.preprocessing.gene_prior_gatae import GenePriorGATConfig, load_gene_prior_gatae_decoder
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ def _load_full_model(checkpoint_path: Path, device: torch.device | str):
 
 
 def load_frozen_decoder(checkpoint_path: str | Path, device: torch.device | str) -> FrozenDecoderBundle:
-    """Load the decoder from a pretrained stVCR AE checkpoint and freeze it.
+    """Load the decoder from a pretrained embedding AE checkpoint and freeze it.
 
     The local preprocessing pipeline saves the whole model object with `torch.save(model, path)`.
     This helper keeps that contract and exposes only the decoder branch for the future
@@ -51,7 +51,7 @@ def load_frozen_decoder(checkpoint_path: str | Path, device: torch.device | str)
     if not hasattr(model, "decode_mlp1"):
         raise ValueError(
             f"Checkpoint {checkpoint_path} does not expose `decode_mlp1`; "
-            "it does not look like a compatible stVCR AE model."
+            "it does not look like a compatible embedding AE model."
         )
 
     decoder = model.decode_mlp1.to(device)
