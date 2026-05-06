@@ -1,0 +1,10 @@
+anndata
+h5py
+matplotlib
+numpy
+pandas
+pillow
+pot
+scipy
+torch
+

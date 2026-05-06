@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spapot"
+version = "0.1.0"
+description = "Spatial Potential Optimal Transport for spatial transcriptomic trajectory reconstruction."
+requires-python = ">=3.9"
+dependencies = [
+  "anndata",
+  "h5py",
+  "matplotlib",
+  "numpy",
+  "pandas",
+  "pillow",
+  "pot",
+  "scipy",
+  "torch",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
