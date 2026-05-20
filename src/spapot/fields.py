@@ -71,10 +71,28 @@ class SpaPOTPotentialModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         s = state[:, : self.spatial_dim]
         z = state[:, self.spatial_dim :]
-        z.requires_grad_(True)
+        if not z.requires_grad:
+            z = z.clone().requires_grad_(True)
         u = self.potential(t, z, s)
         grad_z = torch.autograd.grad(u.sum(), z, create_graph=True, retain_graph=True)[0]
         return u, grad_z
+
+    def potential_derivatives(
+        self,
+        t: torch.Tensor | float,
+        state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        s = state[:, : self.spatial_dim]
+        z = state[:, self.spatial_dim :].clone().requires_grad_(True)
+        if torch.is_tensor(t):
+            t_base = t.to(device=state.device, dtype=state.dtype)
+        else:
+            t_base = torch.tensor(float(t), dtype=state.dtype, device=state.device)
+        t_col = t_base.reshape(1, 1).expand(state.shape[0], 1).clone().requires_grad_(True)
+        u = self.potential_net(torch.cat([t_col, s, z], dim=1))
+        grad_z = torch.autograd.grad(u.sum(), z, create_graph=True, retain_graph=True)[0]
+        grad_t = torch.autograd.grad(u.sum(), t_col, create_graph=True, retain_graph=True)[0]
+        return u, grad_z, grad_t
 
     def forward(self, t: torch.Tensor | float, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         s = state[:, : self.spatial_dim]

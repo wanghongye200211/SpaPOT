@@ -1,71 +1,26 @@
 from __future__ import annotations
 
-import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 
 from .config import ModelConfig, TrainConfig
 from .data import PreparedData, SampledSlice, sample_slice
 from .fields import SpaPOTPotentialModel
 from .integrator import integrate_fixed
-from .losses import (
-    global_mass_ratio_loss,
-    local_soft_mass_loss,
-    spatial_undercoverage_loss,
-    weighted_emd_plan,
-    weighted_expression_reconstruction_loss,
-    weighted_spatial_emd_loss,
-)
+from .losses import grouped_joint_emd_loss, growth_ratio_penalty, weighted_joint_emd_loss
 from .utils import append_jsonl, clear_cache, seed_all
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-EMBEDDING_SRC = PROJECT_ROOT / "src"
-if str(EMBEDDING_SRC) not in sys.path:
-    sys.path.insert(0, str(EMBEDDING_SRC))
-
-from embedding.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder  # noqa: E402
-
-
-@dataclass
-class DecoderRuntime:
-    bundle: Any
-    latent_mean: torch.Tensor | None
-    latent_std: torch.Tensor | None
-
-    def to_decoder_latent(self, standardized_latent: torch.Tensor) -> torch.Tensor:
-        if self.latent_mean is None or self.latent_std is None:
-            return standardized_latent
-        return standardized_latent * self.latent_std + self.latent_mean
-
-
-def load_decoder_runtime(checkpoint_path: Path, device: torch.device) -> DecoderRuntime:
-    bundle = load_frozen_decoder(checkpoint_path, device)
-    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    latent_mean = None
-    latent_std = None
-    if isinstance(payload, dict) and payload.get("model_type") == "gene_prior_gatae":
-        latent_mean = torch.as_tensor(payload["latent_mean"], dtype=torch.float32, device=device).reshape(1, -1)
-        latent_std = torch.as_tensor(payload["latent_std"], dtype=torch.float32, device=device).reshape(1, -1)
-    return DecoderRuntime(bundle=bundle, latent_mean=latent_mean, latent_std=latent_std)
-
-
-def _decode_pred_expression(
-    pred_state: torch.Tensor,
-    data: PreparedData,
-    decoder: DecoderRuntime,
-) -> torch.Tensor:
-    scaled_latent = pred_state[:, data.spatial_dim :]
-    mean = torch.as_tensor(data.scaler.latent_mean, dtype=scaled_latent.dtype, device=scaled_latent.device).reshape(1, -1)
-    std = torch.as_tensor(data.scaler.latent_std, dtype=scaled_latent.dtype, device=scaled_latent.device).reshape(1, -1)
-    standardized_latent = scaled_latent * std + mean
-    decoder_latent = decoder.to_decoder_latent(standardized_latent)
-    return decode_gene_latent(decoder.bundle, decoder_latent)
+def _neighbor_index(source: SampledSlice, spatial_dim: int, n_neighbors: int) -> torch.Tensor | None:
+    if n_neighbors <= 0 or source.state.shape[0] <= 2:
+        return None
+    k = min(int(n_neighbors), int(source.state.shape[0]) - 1)
+    dist = torch.cdist(source.state[:, :spatial_dim], source.state[:, :spatial_dim])
+    _, idx = torch.topk(dist, k=k + 1, largest=False)
+    return idx[:, 1:].contiguous()
 
 
 def _rollout(
@@ -73,7 +28,10 @@ def _rollout(
     source: SampledSlice,
     target_time: float,
     train_config: TrainConfig,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    *,
+    steps: int,
+    neighbor_index: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     logw0 = torch.zeros(source.state.shape[0], 1, dtype=source.state.dtype, device=source.state.device)
     return integrate_fixed(
         model,
@@ -81,317 +39,95 @@ def _rollout(
         logw0,
         source.time_value,
         target_time,
-        steps=train_config.steps_per_interval,
+        steps=max(int(steps), 1),
         method=train_config.integrator,
-        action_gene_weight=train_config.action_gene_weight,
-        action_growth_weight=train_config.action_growth_weight,
+        alpha_exp=train_config.alpha_exp,
+        alpha_gro=train_config.alpha_gro if train_config.use_growth else 0.0,
+        neighbor_index=neighbor_index,
     )
 
 
-def _spatial_deformation_loss(
-    state: torch.Tensor,
-    spatial_velocity: torch.Tensor,
-    weights: torch.Tensor | None,
-    *,
-    spatial_dim: int,
-    n_neighbors: int,
-) -> torch.Tensor:
-    n_obs = int(state.shape[0])
-    if n_obs <= 2 or n_neighbors <= 0:
-        return state.new_zeros(())
-    k = min(int(n_neighbors), n_obs - 1)
-    spatial = state[:, :spatial_dim]
-    dist = torch.cdist(spatial, spatial)
-    _, nn_idx = torch.topk(dist, k=k + 1, largest=False)
-    nn_idx = nn_idx[:, 1:]
-    center_s = spatial.unsqueeze(1)
-    neigh_s = spatial[nn_idx]
-    center_v = spatial_velocity.unsqueeze(1)
-    neigh_v = spatial_velocity[nn_idx]
-    direction = center_s - neigh_s
-    direction = direction / direction.norm(dim=2, keepdim=True).clamp_min(1e-6)
-    radial_rel_velocity = ((center_v - neigh_v) * direction).sum(dim=2).pow(2)
-    if weights is not None:
-        radial_rel_velocity = radial_rel_velocity * weights.reshape(-1, 1)
-    return radial_rel_velocity.mean()
-
-
-def _source_spatial_deformation_loss(
+def _endpoint_term(
     model: SpaPOTPotentialModel,
+    data: PreparedData,
     source: SampledSlice,
-    data: PreparedData,
-    train_config: TrainConfig,
-) -> torch.Tensor:
-    if train_config.lambda_spatial_deform <= 0:
-        return source.state.new_zeros(())
-    _, _, aux = model(source.time_value, source.state)
-    return _spatial_deformation_loss(
-        source.state,
-        aux["spatial_velocity"],
-        None,
-        spatial_dim=data.spatial_dim,
-        n_neighbors=train_config.spatial_deform_neighbors,
-    )
-
-
-def _pred_spatial_deformation_loss(
-    model: SpaPOTPotentialModel,
-    pred_state: torch.Tensor,
-    pred_weights: torch.Tensor,
-    target_time: float,
-    data: PreparedData,
-    train_config: TrainConfig,
-) -> torch.Tensor:
-    if train_config.lambda_spatial_deform <= 0:
-        return pred_state.new_zeros(())
-    _, _, aux = model(target_time, pred_state)
-    return _spatial_deformation_loss(
-        pred_state,
-        aux["spatial_velocity"],
-        pred_weights,
-        spatial_dim=data.spatial_dim,
-        n_neighbors=train_config.spatial_deform_neighbors,
-    )
-
-
-def _cell_type_prior_weighted_emd(
-    pred_state: torch.Tensor,
-    target_state: torch.Tensor,
-    pred_weights: torch.Tensor,
-    source_labels: np.ndarray,
-    target_labels: np.ndarray,
-    *,
-    spatial_dim: int,
-    spatial_cost_weight: float,
-    gene_cost_weight: float,
-    min_count: int,
-) -> torch.Tensor:
-    total = pred_state.new_zeros(())
-    total_group_weight = pred_state.new_zeros(())
-    labels = sorted(set(source_labels.tolist()) & set(target_labels.tolist()))
-    n_target = max(int(target_labels.shape[0]), 1)
-    for label in labels:
-        source_mask_np = source_labels == label
-        target_mask_np = target_labels == label
-        if int(source_mask_np.sum()) < min_count or int(target_mask_np.sum()) < min_count:
-            continue
-        source_mask = torch.as_tensor(source_mask_np, dtype=torch.bool, device=pred_state.device)
-        target_mask = torch.as_tensor(target_mask_np, dtype=torch.bool, device=target_state.device)
-        group_loss, _, _ = weighted_emd_plan(
-            pred_state[source_mask],
-            target_state[target_mask],
-            pred_weights[source_mask],
-            None,
-            spatial_dim=spatial_dim,
-            spatial_cost_weight=spatial_cost_weight,
-            gene_cost_weight=gene_cost_weight,
-        )
-        group_weight = torch.as_tensor(float(target_mask_np.sum()) / float(n_target), dtype=pred_state.dtype, device=pred_state.device)
-        total = total + group_weight * group_loss
-        total_group_weight = total_group_weight + group_weight
-    if float(total_group_weight.detach().cpu()) <= 0:
-        fallback, _, _ = weighted_emd_plan(
-            pred_state,
-            target_state,
-            pred_weights,
-            None,
-            spatial_dim=spatial_dim,
-            spatial_cost_weight=spatial_cost_weight,
-            gene_cost_weight=gene_cost_weight,
-        )
-        return fallback
-    return total / total_group_weight.clamp_min(1e-8)
-
-
-def _interval_loss(
-    model: SpaPOTPotentialModel,
-    data: PreparedData,
-    decoder: DecoderRuntime | None,
     source_index: int,
     target_index: int,
     train_config: TrainConfig,
-) -> dict[str, torch.Tensor]:
-    source = sample_slice(data, source_index, train_config.sample_size)
+    *,
+    direction: str,
+    neighbor_index: torch.Tensor | None,
+) -> dict[str, torch.Tensor | float | str]:
     target = sample_slice(data, target_index, train_config.sample_size)
-    pred_state, pred_logw, action = _rollout(model, source, target.time_value, train_config)
+    n_steps = max(1, train_config.steps_per_interval * abs(int(target_index) - int(source_index)))
+    pred_state, pred_logw, action, ssp = _rollout(
+        model,
+        source,
+        target.time_value,
+        train_config,
+        steps=n_steps,
+        neighbor_index=neighbor_index,
+    )
     pred_weights = torch.exp(pred_logw).reshape(-1)
     if not train_config.use_growth:
         pred_weights = torch.ones_like(pred_weights)
-    spatial_deform = 0.5 * (
-        _source_spatial_deformation_loss(model, source, data, train_config)
-        + _pred_spatial_deformation_loss(model, pred_state, pred_weights, target.time_value, data, train_config)
-    )
 
-    expected_ratio = data.state_by_time[target_index].shape[0] / data.state_by_time[source_index].shape[0]
-    plan = None
     if train_config.use_cell_type_prior:
-        state_ot = _cell_type_prior_weighted_emd(
+        ot_loss = grouped_joint_emd_loss(
             pred_state,
             target.state,
             pred_weights,
             source.labels,
             target.labels,
             spatial_dim=data.spatial_dim,
-            spatial_cost_weight=train_config.state_spatial_cost_weight,
-            gene_cost_weight=train_config.state_gene_cost_weight,
+            kappa_exp=train_config.kappa_exp,
             min_count=train_config.cell_type_prior_min_count,
         )
     else:
-        state_ot, plan, _ = weighted_emd_plan(
-            pred_state,
-            target.state,
-            pred_weights,
-            None,
-            spatial_dim=data.spatial_dim,
-            spatial_cost_weight=train_config.state_spatial_cost_weight,
-            gene_cost_weight=train_config.state_gene_cost_weight,
-        )
-    mass_global = global_mass_ratio_loss(pred_weights, expected_ratio) if train_config.use_growth else pred_weights.new_zeros(())
-    matching = state_ot + train_config.lambda_mass_global * mass_global
-    if train_config.lambda_spatial_ot > 0:
-        spatial_ot = weighted_spatial_emd_loss(
-            pred_state,
-            target.state,
-            pred_weights,
-            None,
-            spatial_dim=data.spatial_dim,
-        )
-    else:
-        spatial_ot = pred_state.new_zeros(())
-    spatial_coverage = (
-        spatial_undercoverage_loss(
+        ot_loss = weighted_joint_emd_loss(
             pred_state,
             target.state,
             pred_weights,
             spatial_dim=data.spatial_dim,
-            bandwidth=train_config.spatial_coverage_bandwidth,
-            anchor_count=train_config.spatial_coverage_anchor_count,
+            kappa_exp=train_config.kappa_exp,
         )
-        if train_config.lambda_spatial_coverage > 0
-        else pred_state.new_zeros(())
-    )
-    mass_local = (
-        local_soft_mass_loss(
-            pred_state,
-            target.state,
-            pred_weights,
-            expected_ratio,
-            bandwidth=train_config.local_mass_bandwidth,
-            anchor_count=train_config.local_mass_anchor_count,
-        )
-        if train_config.use_growth and train_config.lambda_mass_local > 0
-        else pred_weights.new_zeros(())
-    )
-    if train_config.lambda_expr > 0:
-        if decoder is None:
-            raise ValueError("lambda_expr > 0 requires a decoder checkpoint.")
-        if plan is None:
-            _, plan, _ = weighted_emd_plan(
-                pred_state,
-                target.state,
-                pred_weights,
-                None,
-                spatial_dim=data.spatial_dim,
-                spatial_cost_weight=train_config.state_spatial_cost_weight,
-                gene_cost_weight=train_config.state_gene_cost_weight,
-            )
-        decoded = _decode_pred_expression(pred_state, data, decoder)
-        expr = weighted_expression_reconstruction_loss(
-            decoded,
-            target.expression,
-            plan,
-            detach_plan=train_config.detach_transport_plan,
-        )
-    else:
-        expr = pred_state.new_zeros(())
-    action_loss = action.mean()
-    total = (
-        train_config.lambda_state_ot * matching
-        + train_config.lambda_spatial_ot * spatial_ot
-        + train_config.lambda_expr * expr
-        + train_config.lambda_mass_local * mass_local
-        + train_config.lambda_spatial_deform * spatial_deform
-        + train_config.lambda_spatial_coverage * spatial_coverage
-        + train_config.lambda_action * action_loss
-    )
+
+    expected_ratio = data.state_by_time[target_index].shape[0] / data.state_by_time[source_index].shape[0]
+    growth_ratio = growth_ratio_penalty(pred_weights, expected_ratio) if train_config.use_growth else pred_state.new_zeros(())
+    match_loss = ot_loss + float(train_config.kappa_gro) * growth_ratio
     return {
-        "total": total,
-        "matching": matching.detach(),
-        "state_ot": state_ot.detach(),
-        "spatial_ot": spatial_ot.detach(),
-        "expr": expr.detach(),
-        "mass_global": mass_global.detach(),
-        "mass_local": mass_local.detach(),
-        "spatial_deform": spatial_deform.detach(),
-        "spatial_coverage": spatial_coverage.detach(),
-        "action": action_loss.detach(),
+        "direction": direction,
+        "source_time": float(data.time_values[source_index]),
+        "target_time": float(data.time_values[target_index]),
+        "match_loss": match_loss,
+        "ot_loss": ot_loss,
+        "growth_ratio_loss": growth_ratio,
+        "action_loss": action.mean(),
+        "ssp_loss": ssp.mean(),
         "pred_ratio": pred_weights.mean().detach(),
         "expected_ratio": torch.as_tensor(float(expected_ratio), dtype=pred_weights.dtype, device=pred_weights.device),
     }
 
 
-def _rollout_loss(
-    model: SpaPOTPotentialModel,
-    data: PreparedData,
-    target_index: int,
-    train_config: TrainConfig,
-) -> dict[str, torch.Tensor]:
-    source = sample_slice(data, 0, train_config.sample_size)
-    target = sample_slice(data, target_index, train_config.sample_size)
-    pred_state, pred_logw, action = _rollout(model, source, target.time_value, train_config)
-    pred_weights = torch.exp(pred_logw).reshape(-1)
-    if not train_config.use_growth:
-        pred_weights = torch.ones_like(pred_weights)
-
-    expected_ratio = data.state_by_time[target_index].shape[0] / data.state_by_time[0].shape[0]
-    spatial_ot = (
-        weighted_spatial_emd_loss(
-            pred_state,
-            target.state,
-            pred_weights,
-            None,
-            spatial_dim=data.spatial_dim,
-        )
-        if train_config.lambda_rollout_spatial_ot > 0
-        else pred_state.new_zeros(())
-    )
-    mass_global = (
-        global_mass_ratio_loss(pred_weights, expected_ratio)
-        if train_config.use_growth and train_config.lambda_rollout_mass_global > 0
-        else pred_state.new_zeros(())
-    )
-    action_loss = action.mean()
-    total = (
-        train_config.lambda_rollout_spatial_ot * spatial_ot
-        + train_config.lambda_rollout_mass_global * mass_global
-        + train_config.lambda_action * action_loss
-    )
-    zero = pred_state.new_zeros(())
-    return {
-        "total": total,
-        "matching": zero.detach(),
-        "state_ot": zero.detach(),
-        "spatial_ot": spatial_ot.detach(),
-        "expr": zero.detach(),
-        "mass_global": mass_global.detach(),
-        "mass_local": zero.detach(),
-        "spatial_deform": zero.detach(),
-        "spatial_coverage": zero.detach(),
-        "action": action_loss.detach(),
-        "pred_ratio": pred_weights.mean().detach(),
-        "expected_ratio": torch.as_tensor(float(expected_ratio), dtype=pred_weights.dtype, device=pred_weights.device),
-    }
-
-
-def _rollout_scale(epoch: int, train_config: TrainConfig) -> float:
-    if train_config.lambda_rollout_spatial_ot <= 0 and train_config.lambda_rollout_mass_global <= 0:
+def _ramped_weight(base_weight: float, epoch: int, start_epoch: int, ramp_epochs: int) -> float:
+    if base_weight <= 0 or epoch < start_epoch:
         return 0.0
-    if epoch < train_config.rollout_start_epoch:
-        return 0.0
-    if train_config.rollout_ramp_epochs <= 0:
-        return 1.0
-    progress = (epoch - train_config.rollout_start_epoch + 1) / float(train_config.rollout_ramp_epochs)
-    return float(max(0.0, min(1.0, progress)))
+    if ramp_epochs <= 0:
+        return float(base_weight)
+    progress = (epoch - start_epoch + 1) / float(ramp_epochs)
+    return float(base_weight) * float(max(0.0, min(1.0, progress)))
+
+
+def _hjb_loss(model: SpaPOTPotentialModel, data: PreparedData, train_config: TrainConfig) -> torch.Tensor:
+    rows = []
+    for time_index, time_value in enumerate(data.time_values):
+        sampled = sample_slice(data, time_index, train_config.sample_size)
+        _, grad_z, d_u_dt = model.potential_derivatives(time_value, sampled.state)
+        residual = d_u_dt.reshape(-1) - 0.5 * grad_z.pow(2).sum(dim=1)
+        rows.append(residual.pow(2).mean())
+    if not rows:
+        return data.state_by_time[0].new_zeros(())
+    return torch.stack(rows).mean()
 
 
 def train_spapot_model(
@@ -409,33 +145,65 @@ def train_spapot_model(
         trace_path.unlink()
     device = data.state_by_time[0].device
     model = SpaPOTPotentialModel(model_config).to(device)
-    decoder = load_decoder_runtime(decoder_checkpoint, device) if decoder_checkpoint is not None else None
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_config.lr, weight_decay=train_config.weight_decay)
     started = time.time()
-    n_intervals = len(data.time_values) - 1
-    if n_intervals <= 0:
+    n_times = len(data.time_values)
+    if n_times <= 1:
         raise ValueError("Need at least two time points.")
 
+    first_index = 0
+    last_index = n_times - 1
     for epoch in range(train_config.epochs):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        rows = []
-        total_loss = torch.zeros((), dtype=torch.float32, device=device)
-        for idx in range(n_intervals):
-            row = _interval_loss(model, data, decoder, idx, idx + 1, train_config)
-            total_loss = total_loss + row["total"]
-            rows.append(("forward", idx, idx + 1, row))
-            if train_config.use_bidirectional:
-                back = _interval_loss(model, data, decoder, idx + 1, idx, train_config)
-                total_loss = total_loss + back["total"]
-                rows.append(("backward", idx + 1, idx, back))
-        rollout_scale = _rollout_scale(epoch, train_config)
-        if rollout_scale > 0:
-            for target_idx in range(1, len(data.time_values)):
-                rollout = _rollout_loss(model, data, target_idx, train_config)
-                total_loss = total_loss + rollout_scale * rollout["total"]
-                rows.append(("rollout", 0, target_idx, rollout))
-        total_loss = total_loss / max(len(rows), 1)
+
+        terms: list[dict[str, torch.Tensor | float | str]] = []
+        first_source = sample_slice(data, first_index, train_config.sample_size)
+        first_neighbors = _neighbor_index(first_source, data.spatial_dim, train_config.ssp_neighbors) if train_config.lambda_ssp > 0 else None
+        for target_index in range(1, n_times):
+            terms.append(
+                _endpoint_term(
+                    model,
+                    data,
+                    first_source,
+                    first_index,
+                    target_index,
+                    train_config,
+                    direction="forward",
+                    neighbor_index=first_neighbors,
+                )
+            )
+
+        if train_config.use_bidirectional:
+            last_source = sample_slice(data, last_index, train_config.sample_size)
+            last_neighbors = _neighbor_index(last_source, data.spatial_dim, train_config.ssp_neighbors) if train_config.lambda_ssp > 0 else None
+            for target_index in range(0, last_index):
+                terms.append(
+                    _endpoint_term(
+                        model,
+                        data,
+                        last_source,
+                        last_index,
+                        target_index,
+                        train_config,
+                        direction="backward",
+                        neighbor_index=last_neighbors,
+                    )
+                )
+
+        match_loss = torch.stack([term["match_loss"] for term in terms if torch.is_tensor(term["match_loss"])]).mean()
+        action_loss = torch.stack([term["action_loss"] for term in terms if torch.is_tensor(term["action_loss"])]).mean()
+        growth_ratio_loss = torch.stack([term["growth_ratio_loss"] for term in terms if torch.is_tensor(term["growth_ratio_loss"])]).mean()
+        ot_loss = torch.stack([term["ot_loss"] for term in terms if torch.is_tensor(term["ot_loss"])]).mean()
+        ssp_loss = torch.stack([term["ssp_loss"] for term in terms if torch.is_tensor(term["ssp_loss"])]).mean()
+        hjb_scale = _ramped_weight(train_config.lambda_hjb, epoch, train_config.hjb_start_epoch, train_config.hjb_ramp_epochs)
+        hjb_loss = _hjb_loss(model, data, train_config) if hjb_scale > 0 else data.state_by_time[0].new_zeros(())
+        total_loss = (
+            float(train_config.lambda_match) * match_loss
+            + float(train_config.lambda_action) * action_loss
+            + float(train_config.lambda_ssp) * ssp_loss
+            + float(hjb_scale) * hjb_loss
+        )
         total_loss.backward()
         if train_config.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.grad_clip)
@@ -448,25 +216,27 @@ def train_spapot_model(
                     "epoch": int(epoch),
                     "seconds": round(time.time() - started, 3),
                     "total_loss": float(total_loss.detach().cpu()),
-                    "rollout_scale": float(rollout_scale),
-                    "intervals": [
+                    "match_loss": float(match_loss.detach().cpu()),
+                    "ot_loss": float(ot_loss.detach().cpu()),
+                    "growth_ratio_loss": float(growth_ratio_loss.detach().cpu()),
+                    "action_loss": float(action_loss.detach().cpu()),
+                    "ssp_loss": float(ssp_loss.detach().cpu()),
+                    "hjb_loss": float(hjb_loss.detach().cpu()),
+                    "hjb_scale": float(hjb_scale),
+                    "terms": [
                         {
-                            "direction": direction,
-                            "source_time": float(data.time_values[source]),
-                            "target_time": float(data.time_values[target]),
-                            "matching": float(row["matching"].detach().cpu()),
-                            "state_ot": float(row["state_ot"].detach().cpu()),
-                            "spatial_ot": float(row["spatial_ot"].detach().cpu()),
-                            "expr": float(row["expr"].detach().cpu()),
-                            "mass_global": float(row["mass_global"].detach().cpu()),
-                            "mass_local": float(row["mass_local"].detach().cpu()),
-                            "spatial_deform": float(row["spatial_deform"].detach().cpu()),
-                            "spatial_coverage": float(row["spatial_coverage"].detach().cpu()),
-                            "action": float(row["action"].detach().cpu()),
-                            "pred_ratio": float(row["pred_ratio"].detach().cpu()),
-                            "expected_ratio": float(row["expected_ratio"].detach().cpu()),
+                            "direction": str(term["direction"]),
+                            "source_time": float(term["source_time"]),
+                            "target_time": float(term["target_time"]),
+                            "match_loss": float(term["match_loss"].detach().cpu()) if torch.is_tensor(term["match_loss"]) else float(term["match_loss"]),
+                            "ot_loss": float(term["ot_loss"].detach().cpu()) if torch.is_tensor(term["ot_loss"]) else float(term["ot_loss"]),
+                            "growth_ratio_loss": float(term["growth_ratio_loss"].detach().cpu()) if torch.is_tensor(term["growth_ratio_loss"]) else float(term["growth_ratio_loss"]),
+                            "action_loss": float(term["action_loss"].detach().cpu()) if torch.is_tensor(term["action_loss"]) else float(term["action_loss"]),
+                            "ssp_loss": float(term["ssp_loss"].detach().cpu()) if torch.is_tensor(term["ssp_loss"]) else float(term["ssp_loss"]),
+                            "pred_ratio": float(term["pred_ratio"].detach().cpu()) if torch.is_tensor(term["pred_ratio"]) else float(term["pred_ratio"]),
+                            "expected_ratio": float(term["expected_ratio"].detach().cpu()) if torch.is_tensor(term["expected_ratio"]) else float(term["expected_ratio"]),
                         }
-                        for direction, source, target, row in rows
+                        for term in terms
                     ],
                 },
             )
@@ -475,7 +245,8 @@ def train_spapot_model(
 
     checkpoint_path = output_dir / "model.pt"
     checkpoint = {
-        "model_type": "spapot_potential",
+        "model_type": "spapot_hybrid_potential",
+        "dynamics_equation": "dsdt=v(s,z,t); dzdt=-grad_z Phi(s,z,t); dlogwdt=g(s,z,t)",
         "model_config": model_config.to_json_dict(),
         "train_config": train_config.to_json_dict(),
         "state_dict": model.state_dict(),

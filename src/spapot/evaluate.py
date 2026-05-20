@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,43 @@ from .data import PreparedData
 from .fields import SpaPOTPotentialModel
 from .integrator import integrate_fixed
 from .latent_classifier import LatentClassifierConfig, TrainedLatentClassifier, predict_latent_labels, train_latent_classifier
-from .train import DecoderRuntime, _decode_pred_expression, load_decoder_runtime
+from embedding.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder
+
+
+@dataclass
+class DecoderRuntime:
+    bundle: Any
+    latent_mean: torch.Tensor | None
+    latent_std: torch.Tensor | None
+
+    def to_decoder_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        if self.latent_mean is None or self.latent_std is None:
+            return latent
+        return latent * self.latent_std + self.latent_mean
+
+
+def load_decoder_runtime(checkpoint_path: Path, device: torch.device) -> DecoderRuntime:
+    bundle = load_frozen_decoder(checkpoint_path, device)
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    latent_mean = None
+    latent_std = None
+    if isinstance(payload, dict) and payload.get("model_type") == "gene_prior_gatae":
+        latent_mean = torch.as_tensor(payload["latent_mean"], dtype=torch.float32, device=device).reshape(1, -1)
+        latent_std = torch.as_tensor(payload["latent_std"], dtype=torch.float32, device=device).reshape(1, -1)
+    return DecoderRuntime(bundle=bundle, latent_mean=latent_mean, latent_std=latent_std)
+
+
+def _decode_pred_expression(
+    pred_state: torch.Tensor,
+    data: PreparedData,
+    decoder: DecoderRuntime,
+) -> torch.Tensor:
+    scaled_latent = pred_state[:, data.spatial_dim :]
+    mean = torch.as_tensor(data.scaler.latent_mean, dtype=scaled_latent.dtype, device=scaled_latent.device).reshape(1, -1)
+    std = torch.as_tensor(data.scaler.latent_std, dtype=scaled_latent.dtype, device=scaled_latent.device).reshape(1, -1)
+    latent = scaled_latent * std + mean
+    decoder_latent = decoder.to_decoder_latent(latent)
+    return decode_gene_latent(decoder.bundle, decoder_latent)
 
 
 def _color_map(adata: ad.AnnData, annotation_key: str) -> dict[str, Any]:
@@ -132,16 +169,16 @@ def _predict_state(
             stop = min(start + chunk_size, state0.shape[0])
             state0_chunk = state0[start:stop]
             logw0 = torch.zeros(state0_chunk.shape[0], 1, dtype=state0_chunk.dtype, device=state0_chunk.device)
-            state, logw, _ = integrate_fixed(
+            state, logw, _, _ = integrate_fixed(
                 model,
                 state0_chunk,
                 logw0,
                 data.time_values[0],
                 data.time_values[target_index],
-                steps=train_config.steps_per_interval * target_index,
+                steps=max(1, train_config.steps_per_interval * target_index),
                 method=train_config.integrator,
-                action_gene_weight=train_config.action_gene_weight,
-                action_growth_weight=train_config.action_growth_weight,
+                alpha_exp=train_config.alpha_exp,
+                alpha_gro=train_config.alpha_gro if train_config.use_growth else 0.0,
             )
             state_chunks.append(state.detach().cpu().numpy().astype(np.float32))
             if train_config.use_growth:

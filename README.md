@@ -5,18 +5,32 @@
 This repository contains the source implementation of our spatial potential
 model for spatial transcriptomic trajectory reconstruction.
 
-The current public model is potential based:
+The current public model is a hybrid potential dynamics model. Its density-level
+form is:
+
+```text
+∂tρ + ∇s · (ρ vθ) - ∇z · (ρ ∇z Φθ) = gθ ρ
+```
+
+The particle dynamics used in training and reconstruction are:
 
 ```text
 state x = [s, z]
 
-ds/dt      = spatial_net(s, z, t)
-dz/dt      = -grad_z U(s, z, t)
-d log w/dt = growth_net(s, z, t)
+ds/dt      = vθ(s, z, t)
+dz/dt      = -∇z Φθ(s, z, t)
+d log w/dt = gθ(s, z, t)
 ```
 
 where `s` is the spatial coordinate, `z` is a gene-expression embedding, and
 `w` is the learned mass/abundance weight.
+
+Training uses stVCR-like endpoint-to-all-time optimal-transport matching. The
+matching cost combines spatial and gene-latent distances, while growth is
+regularized by a weak cell-number ratio term. The gene-latent velocity is
+constrained by the potential gradient, and spatial motion and growth are learned
+as separate neural fields. Optional cell-type grouped matching, spatial velocity
+smoothness, and HJ/HJB regularization are available but disabled by default.
 
 Install:
 
