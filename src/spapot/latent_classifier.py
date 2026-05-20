@@ -174,7 +174,7 @@ def train_latent_classifier(
         model.load_state_dict(best_state)
     torch.save(
         {
-            "model_type": "full_psg_ruot_gat_latent_classifier",
+            "model_type": "spapot_latent_classifier",
             "config": config.to_json_dict(),
             "categories": categories,
             "input_dim": int(x.shape[1]),

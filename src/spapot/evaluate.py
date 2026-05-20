@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from .config import DataConfig, TrainConfig
 from .data import PreparedData
-from .fields import FullPSGRUOTModel
+from .fields import SpaPOTPotentialModel
 from .integrator import integrate_fixed
 from .latent_classifier import LatentClassifierConfig, TrainedLatentClassifier, predict_latent_labels, train_latent_classifier
 from .train import DecoderRuntime, _decode_pred_expression, load_decoder_runtime
@@ -114,7 +114,7 @@ def _plot_real_pred(real: ad.AnnData, pred: ad.AnnData, path: Path, title: str, 
 
 
 def _predict_state(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     data: PreparedData,
     train_config: TrainConfig,
     target_index: int,
@@ -192,7 +192,7 @@ def _build_pred_adata(
                     torch.mps.empty_cache() if device.type == "mps" else torch.cuda.empty_cache()
         decoded = np.vstack(decoded_chunks).astype(np.float32)
     pred = ad.AnnData(X=sp.csr_matrix(decoded), var=data.adata.var.copy())
-    pred.obs_names = [f"full_psg_pred_{data.raw_time_values[target_index]:g}_{i}" for i in range(pred.n_obs)]
+    pred.obs_names = [f"spapot_pred_{data.raw_time_values[target_index]:g}_{i}" for i in range(pred.n_obs)]
     pred.obs[data_config.annotation_key] = pd.Categorical(labels, categories=data.adata.obs[data_config.annotation_key].cat.categories)
     pred.obs[data_config.raw_time_key] = float(data.raw_time_values[target_index])
     pred.obs[data_config.time_key] = float(data.time_values[target_index])
@@ -207,8 +207,8 @@ def _build_pred_adata(
     return pred
 
 
-def evaluate_full_model(
-    model: FullPSGRUOTModel,
+def evaluate_spapot_model(
+    model: SpaPOTPotentialModel,
     data: PreparedData,
     decoder_checkpoint: Path | None,
     train_config: TrainConfig,

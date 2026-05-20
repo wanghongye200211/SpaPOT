@@ -37,10 +37,9 @@ class DataConfig:
 class ModelConfig:
     spatial_dim: int = 2
     latent_dim: int = 10
-    hidden_dim: int = 256
-    n_hidden: int = 3
-    activation: str = "silu"
-    potential_depends_on_spatial: bool = False
+    hidden_dim: int = 128
+    n_hidden: int = 6
+    activation: str = "relu"
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)

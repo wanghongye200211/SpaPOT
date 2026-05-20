@@ -137,7 +137,7 @@ def ensure_gat_embedding(config: DataConfig) -> tuple[Path, Path]:
     latent.obsm["X_ae"] = z
     if "X_spatial_input" not in latent.obsm:
         latent.obsm["X_spatial_input"] = np.asarray(latent.obsm["spatial"], dtype=np.float32)
-    latent.uns["full_psg_ruot_gat_embedding"] = {
+    latent.uns["spapot_embedding"] = {
         "gene_input_key": "X_gene_input",
         "latent_key": latent_key,
         "decoder_checkpoint_path": str(checkpoint),

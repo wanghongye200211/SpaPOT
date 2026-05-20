@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import torch
 
-from .fields import FullPSGRUOTModel
+from .fields import SpaPOTPotentialModel
 
 
 def _rhs(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     t: torch.Tensor,
     state: torch.Tensor,
     logw: torch.Tensor,
@@ -26,7 +26,7 @@ def _rhs(
 
 
 def integrate_fixed(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     state0: torch.Tensor,
     logw0: torch.Tensor,
     t0: float,
@@ -71,4 +71,3 @@ def integrate_fixed(
             raise ValueError(f"Unsupported integrator: {method}")
         t = t + dt
     return state, logw, action
-

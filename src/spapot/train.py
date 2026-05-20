@@ -11,7 +11,7 @@ import torch
 
 from .config import ModelConfig, TrainConfig
 from .data import PreparedData, SampledSlice, sample_slice
-from .fields import FullPSGRUOTModel
+from .fields import SpaPOTPotentialModel
 from .integrator import integrate_fixed
 from .losses import (
     global_mass_ratio_loss,
@@ -69,7 +69,7 @@ def _decode_pred_expression(
 
 
 def _rollout(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     source: SampledSlice,
     target_time: float,
     train_config: TrainConfig,
@@ -117,7 +117,7 @@ def _spatial_deformation_loss(
 
 
 def _source_spatial_deformation_loss(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     source: SampledSlice,
     data: PreparedData,
     train_config: TrainConfig,
@@ -135,7 +135,7 @@ def _source_spatial_deformation_loss(
 
 
 def _pred_spatial_deformation_loss(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     pred_state: torch.Tensor,
     pred_weights: torch.Tensor,
     target_time: float,
@@ -204,7 +204,7 @@ def _cell_type_prior_weighted_emd(
 
 
 def _interval_loss(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     data: PreparedData,
     decoder: DecoderRuntime | None,
     source_index: int,
@@ -331,7 +331,7 @@ def _interval_loss(
 
 
 def _rollout_loss(
-    model: FullPSGRUOTModel,
+    model: SpaPOTPotentialModel,
     data: PreparedData,
     target_index: int,
     train_config: TrainConfig,
@@ -394,21 +394,21 @@ def _rollout_scale(epoch: int, train_config: TrainConfig) -> float:
     return float(max(0.0, min(1.0, progress)))
 
 
-def train_full_model(
+def train_spapot_model(
     data: PreparedData,
     decoder_checkpoint: Path | None,
     model_config: ModelConfig,
     train_config: TrainConfig,
     *,
     output_dir: Path,
-) -> tuple[FullPSGRUOTModel, dict[str, Any]]:
+) -> tuple[SpaPOTPotentialModel, dict[str, Any]]:
     seed_all(train_config.seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     trace_path = output_dir / "training_trace.jsonl"
     if trace_path.exists():
         trace_path.unlink()
     device = data.state_by_time[0].device
-    model = FullPSGRUOTModel(model_config).to(device)
+    model = SpaPOTPotentialModel(model_config).to(device)
     decoder = load_decoder_runtime(decoder_checkpoint, device) if decoder_checkpoint is not None else None
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_config.lr, weight_decay=train_config.weight_decay)
     started = time.time()
@@ -475,7 +475,7 @@ def train_full_model(
 
     checkpoint_path = output_dir / "model.pt"
     checkpoint = {
-        "model_type": "full_psg_ruot_gat",
+        "model_type": "spapot_potential",
         "model_config": model_config.to_json_dict(),
         "train_config": train_config.to_json_dict(),
         "state_dict": model.state_dict(),
