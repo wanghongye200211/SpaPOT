@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from .config import DataConfig, TrainConfig
 from .data import PreparedData
 from .fields import SpaPOTPotentialModel
-from .integrator import integrate_fixed
+from .integrator import rollout_hybrid_potential
 from .latent_classifier import LatentClassifierConfig, TrainedLatentClassifier, predict_latent_labels, train_latent_classifier
 from embedding.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder
 
@@ -169,7 +169,7 @@ def _predict_state(
             stop = min(start + chunk_size, state0.shape[0])
             state0_chunk = state0[start:stop]
             logw0 = torch.zeros(state0_chunk.shape[0], 1, dtype=state0_chunk.dtype, device=state0_chunk.device)
-            state, logw, _, _ = integrate_fixed(
+            state, logw, _, _ = rollout_hybrid_potential(
                 model,
                 state0_chunk,
                 logw0,

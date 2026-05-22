@@ -31,6 +31,9 @@ regularized by a weak cell-number ratio term. The gene-latent velocity is
 constrained by the potential gradient, and spatial motion and growth are learned
 as separate neural fields. Optional cell-type grouped matching, spatial velocity
 smoothness, and HJ/HJB regularization are available but disabled by default.
+Rollout is performed with `torchdiffeq.odeint`; the default method is fixed-step
+`rk4` for reproducibility, while adaptive methods such as `dopri5` can be used
+for sensitivity checks.
 
 Install:
 

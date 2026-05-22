@@ -17,6 +17,7 @@ dependencies = [
   "pot",
   "scipy",
   "torch",
+  "torchdiffeq",
 ]
 
 [tool.setuptools.packages.find]

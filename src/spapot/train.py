@@ -9,7 +9,7 @@ import torch
 from .config import ModelConfig, TrainConfig
 from .data import PreparedData, SampledSlice, sample_slice
 from .fields import SpaPOTPotentialModel
-from .integrator import integrate_fixed
+from .integrator import rollout_hybrid_potential
 from .losses import grouped_joint_emd_loss, growth_ratio_penalty, weighted_joint_emd_loss
 from .utils import append_jsonl, clear_cache, seed_all
 
@@ -33,7 +33,7 @@ def _rollout(
     neighbor_index: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     logw0 = torch.zeros(source.state.shape[0], 1, dtype=source.state.dtype, device=source.state.device)
-    return integrate_fixed(
+    return rollout_hybrid_potential(
         model,
         source.state,
         logw0,

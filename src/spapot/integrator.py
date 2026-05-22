@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
+from torchdiffeq import odeint
 
 from .fields import SpaPOTPotentialModel
 
@@ -18,29 +20,45 @@ def _spatial_smoothness(
     return local * torch.exp(logw)
 
 
-def _rhs(
-    model: SpaPOTPotentialModel,
-    t: torch.Tensor,
-    state: torch.Tensor,
-    logw: torch.Tensor,
-    *,
-    alpha_exp: float,
-    alpha_gro: float,
-    neighbor_index: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    velocity, growth, aux = model(t, state)
-    spatial_v = aux["spatial_velocity"]
-    gene_v = aux["gene_velocity"]
-    action = (
-        spatial_v.pow(2).sum(dim=1, keepdim=True)
-        + float(alpha_exp) * gene_v.pow(2).sum(dim=1, keepdim=True)
-        + float(alpha_gro) * growth.pow(2)
-    ) * torch.exp(logw)
-    ssp = _spatial_smoothness(spatial_v, logw, neighbor_index)
-    return velocity, growth, action, ssp
+class HybridPotentialODE(nn.Module):
+    def __init__(
+        self,
+        model: SpaPOTPotentialModel,
+        *,
+        alpha_exp: float,
+        alpha_gro: float,
+        direction_sign: float,
+        neighbor_index: torch.Tensor | None,
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.alpha_exp = float(alpha_exp)
+        self.alpha_gro = float(alpha_gro)
+        self.direction_sign = float(direction_sign)
+        self.neighbor_index = neighbor_index
+
+    def forward(
+        self,
+        t: torch.Tensor,
+        y: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state, logw, action, ssp = y
+        del action, ssp
+        velocity, growth, aux = self.model(t, state)
+        spatial_v = aux["spatial_velocity"]
+        gene_v = aux["gene_velocity"]
+        action_rate = (
+            spatial_v.pow(2).sum(dim=1, keepdim=True)
+            + self.alpha_exp * gene_v.pow(2).sum(dim=1, keepdim=True)
+            + self.alpha_gro * growth.pow(2)
+        ) * torch.exp(logw)
+        ssp_rate = _spatial_smoothness(spatial_v, logw, self.neighbor_index)
+        signed_action_rate = self.direction_sign * action_rate
+        signed_ssp_rate = self.direction_sign * ssp_rate
+        return velocity, growth, signed_action_rate, signed_ssp_rate
 
 
-def integrate_fixed(
+def rollout_hybrid_potential(
     model: SpaPOTPotentialModel,
     state0: torch.Tensor,
     logw0: torch.Tensor,
@@ -56,62 +74,28 @@ def integrate_fixed(
     if steps <= 0:
         raise ValueError("steps must be positive.")
     method = method.lower()
-    state = state0
-    logw = logw0
-    action = torch.zeros_like(logw0)
-    ssp = torch.zeros_like(logw0)
-    dt_value = float(t1 - t0) / float(steps)
-    dt = torch.tensor(dt_value, dtype=state0.dtype, device=state0.device)
-    t = torch.tensor(float(t0), dtype=state0.dtype, device=state0.device)
-    for _ in range(steps):
-        if method == "euler":
-            kx, kw, ka, ks = _rhs(
-                model,
-                t,
-                state,
-                logw,
-                alpha_exp=alpha_exp,
-                alpha_gro=alpha_gro,
-                neighbor_index=neighbor_index,
-            )
-            state = state + dt * kx
-            logw = logw + dt * kw
-            action = action + dt.abs() * ka
-            ssp = ssp + dt.abs() * ks
-        elif method == "rk4":
-            k1x, k1w, k1a, k1s = _rhs(model, t, state, logw, alpha_exp=alpha_exp, alpha_gro=alpha_gro, neighbor_index=neighbor_index)
-            k2x, k2w, k2a, k2s = _rhs(
-                model,
-                t + dt / 2,
-                state + dt * k1x / 2,
-                logw + dt * k1w / 2,
-                alpha_exp=alpha_exp,
-                alpha_gro=alpha_gro,
-                neighbor_index=neighbor_index,
-            )
-            k3x, k3w, k3a, k3s = _rhs(
-                model,
-                t + dt / 2,
-                state + dt * k2x / 2,
-                logw + dt * k2w / 2,
-                alpha_exp=alpha_exp,
-                alpha_gro=alpha_gro,
-                neighbor_index=neighbor_index,
-            )
-            k4x, k4w, k4a, k4s = _rhs(
-                model,
-                t + dt,
-                state + dt * k3x,
-                logw + dt * k3w,
-                alpha_exp=alpha_exp,
-                alpha_gro=alpha_gro,
-                neighbor_index=neighbor_index,
-            )
-            state = state + dt * (k1x + 2 * k2x + 2 * k3x + k4x) / 6
-            logw = logw + dt * (k1w + 2 * k2w + 2 * k3w + k4w) / 6
-            action = action + dt.abs() * (k1a + 2 * k2a + 2 * k3a + k4a) / 6
-            ssp = ssp + dt.abs() * (k1s + 2 * k2s + 2 * k3s + k4s) / 6
-        else:
-            raise ValueError(f"Unsupported integrator: {method}")
-        t = t + dt
-    return state, logw, action, ssp
+    if method not in {"dopri5", "rk4", "euler", "midpoint"}:
+        raise ValueError(f"Unsupported torchdiffeq method: {method}")
+    direction_sign = 1.0 if float(t1) >= float(t0) else -1.0
+    action0 = torch.zeros_like(logw0)
+    ssp0 = torch.zeros_like(logw0)
+    t_eval = torch.linspace(float(t0), float(t1), int(steps) + 1, dtype=state0.dtype, device=state0.device)
+    ode_func = HybridPotentialODE(
+        model,
+        alpha_exp=alpha_exp,
+        alpha_gro=alpha_gro,
+        direction_sign=direction_sign,
+        neighbor_index=neighbor_index,
+    )
+    options = None
+    if method in {"rk4", "euler", "midpoint"}:
+        step_size = abs(float(t1) - float(t0)) / float(steps)
+        options = {"step_size": step_size}
+    state_t, logw_t, action_t, ssp_t = odeint(
+        ode_func,
+        (state0, logw0, action0, ssp0),
+        t_eval,
+        method=method,
+        options=options,
+    )
+    return state_t[-1], logw_t[-1], action_t[-1], ssp_t[-1]
