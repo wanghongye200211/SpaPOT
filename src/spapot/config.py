@@ -18,7 +18,8 @@ class DataConfig:
     raw_time_key: str = "time"
     annotation_key: str = "Annotation"
     expression_layer_key: str = "lognorm"
-    spatial_weight: float = 3.0
+    spatial_weight: float = 1.0
+    scale_features: bool = False
     force_rebuild_gat: bool = False
     gat_latent_dim: int = 10
     gat_max_epochs: int = 160
@@ -50,28 +51,38 @@ class TrainConfig:
     device: str = "mps"
     seed: int = 19491001
     epochs: int = 1000
-    sample_size: int = 512
+    sample_size: int = 1024
     lr: float = 1e-3
     weight_decay: float = 1e-5
+    optimizer: str = "adam"
+    loss_mode: str = "spapot_fullgrid"
     integrator: str = "rk4"
+    ode_step_size: float = 0.25
     steps_per_interval: int = 8
     use_bidirectional: bool = True
     use_growth: bool = True
-    lambda_match: float = 1.0
-    lambda_action: float = 1.0
+    lambda_match: float = 400000.0
+    lambda_action: float = 0.0
     alpha_exp: float = 0.01
     alpha_gro: float = 0.0002
     kappa_exp: float = 0.02
     kappa_gro: float = 0.1
     lambda_ssp: float = 0.0
     ssp_neighbors: int = 30
+    lambda_hj: float = 0.0
+    hj_start_epoch: int = 0
+    hj_ramp_epochs: int = 0
+    # Deprecated aliases kept for older local configs.
     lambda_hjb: float = 0.0
     hjb_start_epoch: int = 0
     hjb_ramp_epochs: int = 0
     use_cell_type_prior: bool = False
     cell_type_prior_min_count: int = 3
+    increase_sample_size: bool = True
+    sample_growth_interval: int = 100
+    sample_growth_step: int = 20
     trace_interval: int = 25
-    grad_clip: float = 5.0
+    grad_clip: float = 0.0
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)

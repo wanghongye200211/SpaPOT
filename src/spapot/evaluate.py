@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,8 +20,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 from .config import DataConfig, TrainConfig
 from .data import PreparedData
 from .fields import SpaPOTPotentialModel
-from .integrator import rollout_hybrid_potential
+from .integrator import rollout_spapot_potential
 from .latent_classifier import LatentClassifierConfig, TrainedLatentClassifier, predict_latent_labels, train_latent_classifier
+from .spatiotemporal_classifier import create_spatiotemporal_classifier
 from embedding.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder
 
 
@@ -169,13 +172,17 @@ def _predict_state(
             stop = min(start + chunk_size, state0.shape[0])
             state0_chunk = state0[start:stop]
             logw0 = torch.zeros(state0_chunk.shape[0], 1, dtype=state0_chunk.dtype, device=state0_chunk.device)
-            state, logw, _, _ = rollout_hybrid_potential(
+            if str(getattr(train_config, "loss_mode", "")).lower() == "spapot_fullgrid":
+                steps = max(1, int(math.ceil(abs(float(data.time_values[target_index] - data.time_values[0])) / float(train_config.ode_step_size))))
+            else:
+                steps = max(1, train_config.steps_per_interval * target_index)
+            state, logw, _, _ = rollout_spapot_potential(
                 model,
                 state0_chunk,
                 logw0,
                 data.time_values[0],
                 data.time_values[target_index],
-                steps=max(1, train_config.steps_per_interval * target_index),
+                steps=steps,
                 method=train_config.integrator,
                 alpha_exp=train_config.alpha_exp,
                 alpha_gro=train_config.alpha_gro if train_config.use_growth else 0.0,
@@ -200,19 +207,84 @@ def _predict_state(
     return state_np, weights.astype(np.float32), chosen.astype(int)
 
 
+@torch.no_grad()
+def _spatiotemporal_labels(
+    classifier: torch.nn.Module,
+    label_to_cell_type_map: dict[int, str],
+    spatial: np.ndarray,
+    latent: np.ndarray,
+    time_value: float,
+    device: torch.device,
+) -> np.ndarray:
+    classifier.eval()
+    labels = []
+    for start in range(0, spatial.shape[0], 4096):
+        stop = min(start + 4096, spatial.shape[0])
+        batch_spatial = torch.as_tensor(spatial[start:stop], dtype=torch.float32, device=device)
+        batch_latent = torch.as_tensor(latent[start:stop], dtype=torch.float32, device=device)
+        batch_time = torch.full((batch_spatial.shape[0], 1), float(time_value), dtype=torch.float32, device=device)
+        logits = classifier(torch.cat((batch_spatial, batch_latent, batch_time), dim=1))
+        pred = logits.argmax(dim=1).detach().cpu().numpy()
+        labels.extend(str(label_to_cell_type_map[int(idx)]) for idx in pred)
+    return np.asarray(labels, dtype=object)
+
+
+def _train_spapot_spatiotemporal_classifier(
+    data: PreparedData,
+    data_config: DataConfig,
+    output_dir: Path,
+) -> tuple[torch.nn.Module, dict[int, str], Path]:
+    observed = data.adata.copy()
+    observed.obs[data_config.annotation_key] = observed.obs[data_config.annotation_key].astype("category")
+    observed.obsm["X_spatial_aligned"] = np.asarray(observed.obsm[data_config.spatial_key], dtype=np.float32)
+    classifier_path = output_dir / "spatiotemporal_classifier.pt"
+    label_to_cell_type_map = create_spatiotemporal_classifier(
+        observed,
+        str(classifier_path),
+        annotation_key=data_config.annotation_key,
+        device=data.state_by_time[0].device,
+        spatial_key="X_spatial_aligned",
+        latent_key=data_config.latent_key,
+        time_key=data_config.time_key,
+    )
+    (output_dir / "label_to_cell_type_map.json").write_text(
+        json.dumps({str(k): str(v) for k, v in label_to_cell_type_map.items()}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    classifier = torch.load(classifier_path, map_location=data.state_by_time[0].device, weights_only=False)
+    return classifier.to(data.state_by_time[0].device).eval(), {int(k): str(v) for k, v in label_to_cell_type_map.items()}, classifier_path
+
+
 def _build_pred_adata(
     data: PreparedData,
     data_config: DataConfig,
     decoder: DecoderRuntime | None,
-    classifier: TrainedLatentClassifier,
+    latent_classifier: TrainedLatentClassifier | None,
+    st_classifier: torch.nn.Module | None,
+    st_label_map: dict[int, str] | None,
     pred_state_all: np.ndarray,
     pred_weights_all: np.ndarray,
     chosen: np.ndarray,
     target_index: int,
+    label_source: str,
 ) -> ad.AnnData:
     pred_state = pred_state_all[chosen]
     spatial, latent = data.scaler.inverse(pred_state)
-    labels = predict_latent_labels(classifier, latent, device=data.state_by_time[0].device)
+    if label_source == "spatiotemporal_classifier":
+        if st_classifier is None or st_label_map is None:
+            raise ValueError("spatiotemporal label source requires a trained classifier and label map.")
+        labels = _spatiotemporal_labels(
+            st_classifier,
+            st_label_map,
+            spatial,
+            latent,
+            data.time_values[target_index],
+            data.state_by_time[0].device,
+        )
+    else:
+        if latent_classifier is None:
+            raise ValueError("latent_z_classifier label source requires a trained latent classifier.")
+        labels = predict_latent_labels(latent_classifier, latent, device=data.state_by_time[0].device)
     if decoder is None:
         decoded = sp.csr_matrix((pred_state.shape[0], data.expression_dim), dtype=np.float32)
     else:
@@ -233,7 +305,7 @@ def _build_pred_adata(
     pred.obs[data_config.annotation_key] = pd.Categorical(labels, categories=data.adata.obs[data_config.annotation_key].cat.categories)
     pred.obs[data_config.raw_time_key] = float(data.raw_time_values[target_index])
     pred.obs[data_config.time_key] = float(data.time_values[target_index])
-    pred.obs["label_source"] = "latent_z_classifier"
+    pred.obs["label_source"] = str(label_source)
     pred.obs["source_initial_index"] = chosen
     pred.obs["source_weight"] = pred_weights_all[chosen]
     pred.obsm["X_spatial_aligned"] = spatial
@@ -259,12 +331,20 @@ def evaluate_spapot_model(
     pred_dir.mkdir(exist_ok=True)
     comparison_dir.mkdir(exist_ok=True)
     decoder = load_decoder_runtime(decoder_checkpoint, data.state_by_time[0].device) if decoder_checkpoint is not None else None
-    classifier = train_latent_classifier(
-        data,
-        data_config.annotation_key,
-        output_dir=output_dir / "latent_classifier",
-        config=LatentClassifierConfig(epochs=500, patience=60, seed=train_config.seed),
-    )
+    label_source = "spatiotemporal_classifier" if str(getattr(train_config, "loss_mode", "")).lower() == "spapot_fullgrid" else "latent_z_classifier"
+    latent_classifier = None
+    st_classifier = None
+    st_label_map = None
+    st_classifier_path = None
+    if label_source == "spatiotemporal_classifier":
+        st_classifier, st_label_map, st_classifier_path = _train_spapot_spatiotemporal_classifier(data, data_config, output_dir)
+    else:
+        latent_classifier = train_latent_classifier(
+            data,
+            data_config.annotation_key,
+            output_dir=output_dir / "latent_classifier",
+            config=LatentClassifierConfig(epochs=500, patience=60, seed=train_config.seed),
+        )
     observed = data.adata.copy()
     observed.obs[data_config.annotation_key] = observed.obs[data_config.annotation_key].astype("category")
     observed.obsm["X_spatial_aligned"] = np.asarray(observed.obsm[data_config.spatial_key], dtype=np.float32)
@@ -273,7 +353,19 @@ def evaluate_spapot_model(
     model.eval()
     for target_index, raw_time in enumerate(data.raw_time_values):
         state_all, weights_all, chosen = _predict_state(model, data, train_config, target_index)
-        pred = _build_pred_adata(data, data_config, decoder, classifier, state_all, weights_all, chosen, target_index)
+        pred = _build_pred_adata(
+            data,
+            data_config,
+            decoder,
+            latent_classifier,
+            st_classifier,
+            st_label_map,
+            state_all,
+            weights_all,
+            chosen,
+            target_index,
+            label_source,
+        )
         suffix = str(raw_time).replace(".", "p")
         pred_path = pred_dir / f"predict_{suffix}.h5ad"
         pred.write_h5ad(pred_path)
@@ -306,13 +398,21 @@ def evaluate_spapot_model(
         "mass_diagnostics_csv": str(mass_csv),
         "predictions_dir": str(pred_dir),
         "comparisons_dir": str(comparison_dir),
-        "label_source": "latent_z_classifier",
+        "label_source": label_source,
         "latent_classifier": {
-            "checkpoint": str(classifier.checkpoint_path),
-            "trace": str(classifier.trace_path),
-            "config": classifier.config.to_json_dict(),
-            "categories": classifier.categories,
-        },
+            "checkpoint": str(latent_classifier.checkpoint_path),
+            "trace": str(latent_classifier.trace_path),
+            "config": latent_classifier.config.to_json_dict(),
+            "categories": latent_classifier.categories,
+        }
+        if latent_classifier is not None
+        else None,
+        "spatiotemporal_classifier": {
+            "checkpoint": str(st_classifier_path),
+            "label_to_cell_type_map": str(output_dir / "label_to_cell_type_map.json"),
+        }
+        if st_classifier_path is not None
+        else None,
         "final": metrics[-1],
         "metrics": metrics,
         "mass_diagnostics": mass_rows,

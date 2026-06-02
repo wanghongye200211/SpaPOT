@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ class FeatureScaler:
     latent_mean: np.ndarray
     latent_std: np.ndarray
     spatial_weight: float
+    scale_features: bool = True
 
     def transform(self, spatial: np.ndarray, latent: np.ndarray) -> np.ndarray:
         s = (spatial - self.spatial_mean) / self.spatial_std
@@ -69,6 +71,7 @@ class FeatureScaler:
             "latent_mean": self.latent_mean.tolist(),
             "latent_std": self.latent_std.tolist(),
             "spatial_weight": float(self.spatial_weight),
+            "scale_features": bool(self.scale_features),
         }
 
 
@@ -173,14 +176,25 @@ def load_prepared_data(config: DataConfig, device: torch.device) -> tuple[Prepar
     expression_matrix = adata.layers[config.expression_layer_key] if config.expression_layer_key in adata.layers else adata.X
     expression = _to_dense_float32(expression_matrix)
 
-    spatial_std = np.where(spatial.std(axis=0) < 1e-6, 1.0, spatial.std(axis=0))
-    latent_std = np.where(latent.std(axis=0) < 1e-6, 1.0, latent.std(axis=0))
+    if config.scale_features:
+        spatial_mean = spatial.mean(axis=0)
+        spatial_std = np.where(spatial.std(axis=0) < 1e-6, 1.0, spatial.std(axis=0))
+        latent_mean = latent.mean(axis=0)
+        latent_std = np.where(latent.std(axis=0) < 1e-6, 1.0, latent.std(axis=0))
+        spatial_weight = float(config.spatial_weight)
+    else:
+        spatial_mean = np.zeros(spatial.shape[1], dtype=np.float32)
+        spatial_std = np.ones(spatial.shape[1], dtype=np.float32)
+        latent_mean = np.zeros(latent.shape[1], dtype=np.float32)
+        latent_std = np.ones(latent.shape[1], dtype=np.float32)
+        spatial_weight = 1.0
     scaler = FeatureScaler(
-        spatial_mean=spatial.mean(axis=0),
+        spatial_mean=spatial_mean,
         spatial_std=spatial_std,
-        latent_mean=latent.mean(axis=0),
+        latent_mean=latent_mean,
         latent_std=latent_std,
-        spatial_weight=float(config.spatial_weight),
+        spatial_weight=spatial_weight,
+        scale_features=bool(config.scale_features),
     )
     state = scaler.transform(spatial, latent)
     time_values = sorted(float(v) for v in np.unique(np.asarray(adata.obs[config.time_key], dtype=np.float32)))
@@ -226,7 +240,8 @@ def sample_slice(data: PreparedData, time_index: int, sample_size: int) -> Sampl
     raw_indices = data.raw_indices_by_time[time_index]
     n_obs = state.shape[0]
     if n_obs > sample_size:
-        chosen = torch.randperm(n_obs, device=state.device)[:sample_size]
+        chosen_py = random.sample(range(0, int(n_obs)), int(sample_size))
+        chosen = torch.as_tensor(chosen_py, dtype=torch.long, device=state.device)
     else:
         chosen = torch.arange(n_obs, dtype=torch.long, device=state.device)
     chosen_cpu = chosen.detach().cpu().numpy()

@@ -15,7 +15,7 @@ def _activation(name: str) -> nn.Module:
     if key == "elu":
         return nn.ELU()
     if key == "leakyrelu":
-        return nn.LeakyReLU(0.2)
+        return nn.LeakyReLU()
     if key == "silu":
         return nn.SiLU()
     raise ValueError(f"Unsupported activation: {name}")
@@ -33,16 +33,19 @@ def make_mlp(in_dim: int, out_dim: int, hidden_dim: int, n_hidden: int, activati
 
 
 class SpaPOTPotentialModel(nn.Module):
-    """Potential-only SpaPOT dynamics.
+    """SpaPOT Hybrid dynamics.
 
-    The model keeps the public implementation focused on the current method:
+    This is the fixed model family used by the current SpaPOT reconstruction
+    path:
 
         ds/dt      = spatial_net(s, z, t)
         dz/dt      = -grad_z U(s, z, t)
         d log w/dt = growth_net(s, z, t)
 
     Spatial motion is a direct neural field, while gene-latent motion is
-    constrained by a scalar potential landscape.
+    constrained by a scalar potential landscape. The growth branch intentionally
+    uses the SpaPOT Hybrid three-hidden-layer MLP; it does not follow
+    ``config.n_hidden``.
     """
 
     def __init__(self, config: ModelConfig) -> None:
@@ -53,7 +56,7 @@ class SpaPOTPotentialModel(nn.Module):
         state_dim = self.spatial_dim + self.latent_dim
         self.potential_net = make_mlp(state_dim + 1, 1, config.hidden_dim, config.n_hidden, config.activation)
         self.spatial_net = make_mlp(state_dim + 1, self.spatial_dim, config.hidden_dim, config.n_hidden, config.activation)
-        self.growth_net = make_mlp(state_dim + 1, 1, config.hidden_dim, config.n_hidden, config.activation)
+        self.growth_net = make_mlp(state_dim + 1, 1, config.hidden_dim, 3, config.activation)
 
     def _time_column(self, t: torch.Tensor | float, n: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if not torch.is_tensor(t):

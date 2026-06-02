@@ -7,4 +7,4 @@ pillow
 pot
 scipy
 torch
-
+torchdiffeq
