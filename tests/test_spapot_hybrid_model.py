@@ -49,6 +49,18 @@ class SpaPOTHybridModelTest(unittest.TestCase):
         self.assertEqual(len(_linear_layers(model.potential_net)), 3)
         self.assertEqual(len(_linear_layers(model.growth_net)), 4)
 
+    def test_seeded_branch_initialization_order_is_stable(self) -> None:
+        torch.manual_seed(19491001)
+        model = SpaPOTPotentialModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=128, n_hidden=6))
+
+        spatial_sum = float(_linear_layers(model.spatial_net)[0].weight.detach().sum())
+        potential_sum = float(_linear_layers(model.potential_net)[0].weight.detach().sum())
+        growth_sum = float(_linear_layers(model.growth_net)[0].weight.detach().sum())
+
+        self.assertAlmostEqual(spatial_sum, -1.0490612983703613, places=6)
+        self.assertAlmostEqual(potential_sum, -4.505341529846191, places=6)
+        self.assertAlmostEqual(growth_sum, 8.79880142211914, places=6)
+
     def test_defaults_are_spapot_fullgrid(self) -> None:
         config = TrainConfig()
         self.assertEqual(config.loss_mode, "spapot_fullgrid")

@@ -54,8 +54,8 @@ class SpaPOTPotentialModel(nn.Module):
         self.spatial_dim = int(config.spatial_dim)
         self.latent_dim = int(config.latent_dim)
         state_dim = self.spatial_dim + self.latent_dim
-        self.potential_net = make_mlp(state_dim + 1, 1, config.hidden_dim, config.n_hidden, config.activation)
         self.spatial_net = make_mlp(state_dim + 1, self.spatial_dim, config.hidden_dim, config.n_hidden, config.activation)
+        self.potential_net = make_mlp(state_dim + 1, 1, config.hidden_dim, config.n_hidden, config.activation)
         self.growth_net = make_mlp(state_dim + 1, 1, config.hidden_dim, 3, config.activation)
 
     def _time_column(self, t: torch.Tensor | float, n: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
