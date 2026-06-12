@@ -92,9 +92,9 @@ def _label_metrics(real: ad.AnnData, pred: ad.AnnData, annotation_key: str) -> d
     }
 
 
-def _spatial_metrics(real: ad.AnnData, pred: ad.AnnData, annotation_key: str) -> dict[str, Any]:
-    real_xy = np.asarray(real.obsm["X_spatial_aligned"], dtype=np.float32)
-    pred_xy = np.asarray(pred.obsm["X_spatial_aligned"], dtype=np.float32)
+def _spatial_metrics(real: ad.AnnData, pred: ad.AnnData, annotation_key: str, spatial_key: str) -> dict[str, Any]:
+    real_xy = np.asarray(real.obsm[spatial_key], dtype=np.float32)
+    pred_xy = np.asarray(pred.obsm[spatial_key], dtype=np.float32)
     union = np.vstack([real_xy, pred_xy])
     diag = float(np.linalg.norm(union.max(axis=0) - union.min(axis=0)))
     real_tree = cKDTree(real_xy)
@@ -125,17 +125,17 @@ def _spatial_metrics(real: ad.AnnData, pred: ad.AnnData, annotation_key: str) ->
     }
 
 
-def _plot_real_pred(real: ad.AnnData, pred: ad.AnnData, path: Path, title: str, annotation_key: str) -> None:
+def _plot_real_pred(real: ad.AnnData, pred: ad.AnnData, path: Path, title: str, annotation_key: str, spatial_key: str) -> None:
     cmap = _color_map(real, annotation_key)
     categories = list(real.obs[annotation_key].cat.categories)
-    real_xy = np.asarray(real.obsm["X_spatial_aligned"], dtype=np.float32)
-    pred_xy = np.asarray(pred.obsm["X_spatial_aligned"], dtype=np.float32)
+    real_xy = np.asarray(real.obsm[spatial_key], dtype=np.float32)
+    pred_xy = np.asarray(pred.obsm[spatial_key], dtype=np.float32)
     union = np.vstack([real_xy, pred_xy])
     xpad = 0.04 * (union[:, 0].max() - union[:, 0].min())
     ypad = 0.04 * (union[:, 1].max() - union[:, 1].min())
     fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharex=True, sharey=True)
     for ax, panel, label in [(axes[0], real, "real"), (axes[1], pred, "predicted")]:
-        xy = np.asarray(panel.obsm["X_spatial_aligned"], dtype=np.float32)
+        xy = np.asarray(panel.obsm[spatial_key], dtype=np.float32)
         labels = panel.obs[annotation_key].astype(str).to_numpy()
         for category in categories:
             mask = labels == category
@@ -236,14 +236,13 @@ def _train_spapot_spatiotemporal_classifier(
 ) -> tuple[torch.nn.Module, dict[int, str], Path]:
     observed = data.adata.copy()
     observed.obs[data_config.annotation_key] = observed.obs[data_config.annotation_key].astype("category")
-    observed.obsm["X_spatial_aligned"] = np.asarray(observed.obsm[data_config.spatial_key], dtype=np.float32)
     classifier_path = output_dir / "spatiotemporal_classifier.pt"
     label_to_cell_type_map = create_spatiotemporal_classifier(
         observed,
         str(classifier_path),
         annotation_key=data_config.annotation_key,
         device=data.state_by_time[0].device,
-        spatial_key="X_spatial_aligned",
+        spatial_key=data_config.spatial_key,
         latent_key=data_config.latent_key,
         time_key=data_config.time_key,
     )
@@ -308,7 +307,6 @@ def _build_pred_adata(
     pred.obs["label_source"] = str(label_source)
     pred.obs["source_initial_index"] = chosen
     pred.obs["source_weight"] = pred_weights_all[chosen]
-    pred.obsm["X_spatial_aligned"] = spatial
     pred.obsm[data_config.spatial_key] = spatial
     pred.obsm[data_config.latent_key] = latent
     pred.uns["Annotation_colors"] = data.adata.uns.get("Annotation_colors", [])
@@ -347,7 +345,6 @@ def evaluate_spapot_model(
         )
     observed = data.adata.copy()
     observed.obs[data_config.annotation_key] = observed.obs[data_config.annotation_key].astype("category")
-    observed.obsm["X_spatial_aligned"] = np.asarray(observed.obsm[data_config.spatial_key], dtype=np.float32)
     metrics = []
     mass_rows = []
     model.eval()
@@ -373,9 +370,9 @@ def evaluate_spapot_model(
         real.obs[data_config.annotation_key] = real.obs[data_config.annotation_key].astype("category")
         row: dict[str, Any] = {"time": float(raw_time), "time_input": float(data.time_values[target_index]), "pred_h5ad": str(pred_path)}
         row.update(_label_metrics(real, pred, data_config.annotation_key))
-        row.update(_spatial_metrics(real, pred, data_config.annotation_key))
+        row.update(_spatial_metrics(real, pred, data_config.annotation_key, data_config.spatial_key))
         plot_path = comparison_dir / f"{suffix}_real_vs_pred.png"
-        _plot_real_pred(real, pred, plot_path, f"SpaPOT E{raw_time:g}", data_config.annotation_key)
+        _plot_real_pred(real, pred, plot_path, f"SpaPOT E{raw_time:g}", data_config.annotation_key, data_config.spatial_key)
         row["compare_png"] = str(plot_path)
         metrics.append(row)
         expected_ratio = data.state_by_time[target_index].shape[0] / data.state_by_time[0].shape[0]

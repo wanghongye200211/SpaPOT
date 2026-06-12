@@ -155,7 +155,7 @@ def create_spatiotemporal_classifier(
     annotation_key: str = "Annotation",
     device: torch.device | None = None,
     *,
-    spatial_key: str = "X_spatial_aligned",
+    spatial_key: str = "X_spatial_input",
     latent_key: str = "X_gene_input",
     time_key: str = "time_input",
     trace_path: str | Path | None = None,
@@ -164,7 +164,7 @@ def create_spatiotemporal_classifier(
     early_stop: int = 50,
     seed: int = 19491001,
 ) -> dict[int, str]:
-    """Train the SpaPOT classifier used for Hybrid readout."""
+    """Train the SpaPOT spatiotemporal cell-type readout."""
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
