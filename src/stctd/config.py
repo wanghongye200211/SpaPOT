@@ -18,8 +18,8 @@ class DataConfig:
     raw_time_key: str = "time"
     annotation_key: str = "Annotation"
     expression_layer_key: str = "lognorm"
-    spatial_weight: float = 1.0
-    scale_features: bool = False
+    spatial_weight: float = 3.0
+    scale_features: bool = True
     force_rebuild_gat: bool = False
     gat_latent_dim: int = 10
     gat_max_epochs: int = 160
@@ -41,6 +41,7 @@ class ModelConfig:
     hidden_dim: int = 128
     n_hidden: int = 6
     activation: str = "relu"
+    velocity_parameterization: str = "potential"
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -55,7 +56,7 @@ class TrainConfig:
     lr: float = 1e-3
     weight_decay: float = 1e-5
     optimizer: str = "adam"
-    loss_mode: str = "spapot_fullgrid"
+    loss_mode: str = "stctd_fullgrid"
     integrator: str = "rk4"
     ode_step_size: float = 0.25
     steps_per_interval: int = 8

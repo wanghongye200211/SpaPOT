@@ -17,17 +17,17 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from spapot.config import DataConfig, ModelConfig, TrainConfig  # noqa: E402
-from spapot.data import PreparedData, load_prepared_data  # noqa: E402
-from spapot.evaluate import evaluate_spapot_model  # noqa: E402
-from spapot.train import train_spapot_model  # noqa: E402
-from spapot.utils import resolve_device, write_json  # noqa: E402
+from stctd.config import DataConfig, ModelConfig, TrainConfig  # noqa: E402
+from stctd.data import PreparedData, load_prepared_data  # noqa: E402
+from stctd.evaluate import evaluate_stctd_model  # noqa: E402
+from stctd.train import train_stctd_model  # noqa: E402
+from stctd.utils import resolve_device, write_json  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the SpaPOT Hybrid model with the full time-grid objective.")
+    parser = argparse.ArgumentParser(description="Train the stCTD model with the full time-grid objective.")
     parser.add_argument("--input-h5ad", type=Path, required=True)
-    parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "runs" / "spapot_hybrid")
+    parser.add_argument("--out-dir", type=Path, default=REPO_ROOT / "runs" / "stctd")
     parser.add_argument("--device", default="auto", choices=["cpu", "mps", "cuda", "auto"])
     parser.add_argument("--spatial-key", default="X_spatial_input")
     parser.add_argument("--latent-key", default="X_gene_input")
@@ -42,17 +42,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--n-hidden", type=int, default=6)
     parser.add_argument("--activation", default="relu")
+    parser.add_argument("--velocity-parameterization", choices=["potential", "vector"], default="potential")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", default="adam", choices=["adam", "adamw"])
-    parser.add_argument("--loss-mode", default="spapot_fullgrid", choices=["spapot_fullgrid", "endpoint"])
+    parser.add_argument("--loss-mode", default="stctd_fullgrid", choices=["stctd_fullgrid", "endpoint"])
     parser.add_argument("--ode-step-size", type=float, default=0.25)
     parser.add_argument("--steps-per-interval", type=int, default=8)
     parser.add_argument("--lambda-match", type=float, default=4e5)
     parser.add_argument("--lambda-action", type=float, default=0.0)
     parser.add_argument("--lambda-ssp", type=float, default=0.0)
     parser.add_argument("--lambda-hj", type=float, default=0.0)
-    parser.add_argument("--spatial-weight", type=float, default=1.0)
-    parser.add_argument("--scale-features", action="store_true")
+    parser.add_argument("--spatial-weight", type=float, default=3.0)
+    parser.add_argument("--scale-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--alpha-exp", type=float, default=0.01)
     parser.add_argument("--alpha-gro", type=float, default=0.0002)
     parser.add_argument("--kappa-exp", type=float, default=0.02)
@@ -92,9 +93,10 @@ def _check_required_obs_values(data: PreparedData, required: list[list[str]]) ->
 def _metrics_rows(summary: dict[str, Any], baseline_paths: list[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     eval_metrics = summary["evaluation"]["metrics"]
+    method_name = str(summary["config"].get("method", "stCTD"))
     rows.append(
         {
-            "method": "SpaPOT Hybrid",
+            "method": method_name,
             "run_dir": summary["run_dir"],
             "avg_label_prop_corr": float(np.mean([m["label_prop_corr"] for m in eval_metrics])),
             "avg_label_prop_l1": float(np.mean([m["label_prop_l1"] for m in eval_metrics])),
@@ -163,6 +165,7 @@ def main() -> None:
         hidden_dim=int(args.hidden_dim),
         n_hidden=int(args.n_hidden),
         activation=str(args.activation),
+        velocity_parameterization=str(args.velocity_parameterization),
     )
     train_config = TrainConfig(
         device=str(device),
@@ -191,25 +194,26 @@ def main() -> None:
         sample_growth_step=int(args.sample_growth_step),
         trace_interval=int(args.trace_interval),
     )
+    method_name = "stCTD" if args.velocity_parameterization == "potential" else "stCTD vector ablation"
     config_payload = {
-        "method": "SpaPOT Hybrid",
+        "method": method_name,
         "data": data_config.to_json_dict(),
         "model": model_config.to_json_dict(),
         "train": train_config.to_json_dict(),
         "required_obs_counts": required_obs_counts,
         "observed_shape": list(data.adata.shape),
-        "note": "SpaPOT Hybrid is a model-level objective; dataset filtering is controlled only by explicit input h5ad and optional obs guards.",
+        "note": "Dataset filtering is controlled only by the explicit input h5ad and optional obs guards.",
     }
     write_json(args.out_dir / "config.json", config_payload)
 
-    model, train_summary = train_spapot_model(
+    model, train_summary = train_stctd_model(
         data,
         decoder_checkpoint,
         model_config,
         train_config,
         output_dir=args.out_dir / "checkpoints",
     )
-    eval_summary = evaluate_spapot_model(
+    eval_summary = evaluate_stctd_model(
         model,
         data,
         decoder_checkpoint,
@@ -226,7 +230,7 @@ def main() -> None:
         "config": config_payload,
     }
     rows = _metrics_rows(summary, list(args.baseline_summary))
-    comparison_csv = args.out_dir / "spapot_vs_baseline_metrics.csv"
+    comparison_csv = args.out_dir / "stctd_vs_baseline_metrics.csv"
     pd.DataFrame(rows).to_csv(comparison_csv, index=False)
     summary["comparison_csv"] = str(comparison_csv)
     summary["comparison_rows"] = rows
@@ -238,7 +242,7 @@ def main() -> None:
             "run_dir": summary["run_dir"],
             "seconds": summary["seconds"],
             "required_obs_counts": required_obs_counts,
-            "spapot": rows[0],
+            "stctd": rows[0],
         }
         print(json.dumps(compact, indent=2, ensure_ascii=False))
     else:

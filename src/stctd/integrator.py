@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torchdiffeq import odeint
 
-from .fields import SpaPOTPotentialModel
+from .fields import STCTDModel
 
 
 def _spatial_smoothness(
@@ -20,10 +20,10 @@ def _spatial_smoothness(
     return local * torch.exp(logw)
 
 
-class SpaPOTPotentialODE(nn.Module):
+class STCTDODE(nn.Module):
     def __init__(
         self,
-        model: SpaPOTPotentialModel,
+        model: STCTDModel,
         *,
         alpha_exp: float,
         alpha_gro: float,
@@ -60,8 +60,8 @@ class SpaPOTPotentialODE(nn.Module):
         return velocity, growth, signed_action_rate, signed_ssp_rate
 
 
-def rollout_spapot_potential(
-    model: SpaPOTPotentialModel,
+def rollout_stctd(
+    model: STCTDModel,
     state0: torch.Tensor,
     logw0: torch.Tensor,
     t0: float,
@@ -83,7 +83,7 @@ def rollout_spapot_potential(
     action0 = torch.zeros_like(logw0)
     ssp0 = torch.zeros_like(logw0)
     t_eval = torch.linspace(float(t0), float(t1), int(steps) + 1, dtype=state0.dtype, device=state0.device)
-    ode_func = SpaPOTPotentialODE(
+    ode_func = STCTDODE(
         model,
         alpha_exp=alpha_exp,
         alpha_gro=alpha_gro,
@@ -103,8 +103,3 @@ def rollout_spapot_potential(
         options=options,
     )
     return state_t[-1], logw_t[-1], action_t[-1], ssp_t[-1]
-
-
-# Backward-compatible names used by earlier SpaPOT scripts.
-HybridPotentialODE = SpaPOTPotentialODE
-rollout_hybrid_potential = rollout_spapot_potential

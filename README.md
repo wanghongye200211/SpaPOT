@@ -1,124 +1,151 @@
-# SpaPOT
+# stCTD
 
-**SpaPOT** stands for **Spatial Potential Optimal Transport**.
+**stCTD** is the **Spatiotemporal Critical Transition Decipherer**, a generative
+deep-learning framework for reconstructing continuous single-cell or spot-level
+spatiotemporal population dynamics from discrete time-series spatial
+transcriptomic snapshots.
 
-This repository contains the source implementation of our spatial potential
-model for spatial transcriptomic trajectory reconstruction.
+stCTD jointly models molecular-potential reorganization, spatial transport, and
+source-sink population growth. Along the reconstructed trajectory, it can
+retrospectively localize transition-sensitive intervals, resolve the populations
+contributing to those signals, and support in silico perturbation of candidate
+gene programs.
 
-The current public model is the SpaPOT Hybrid
-spatial-potential-growth field selected from the figure provenance audit. Its
-density-level form is:
+- Code repository: <https://github.com/wanghongye200211/stCTD>
+- Interactive project website: <https://wanghongye200211.github.io/stCTDcover/>
+- Website source: <https://github.com/wanghongye200211/stCTDcover>
+
+## Model
+
+Each cell or spot is represented by a joint state `x = [s, z]`, where `s` is a
+two-dimensional tissue coordinate and `z` is a graph-informed molecular latent
+state. stCTD evaluates three coupled, time-dependent neural fields:
 
 ```text
-∂tρ + ∇s · (ρ vθ) - ∇z · (ρ ∇z Φθ) = gθ ρ
+ds/dt      = v_theta(s, z, t)
+dz/dt      = -grad_z Phi_theta(s, z, t)
+d log w/dt = g_theta(s, z, t)
 ```
 
-The particle dynamics used in training and reconstruction are:
+Here, `v_theta` controls spatial redistribution, `Phi_theta` defines the
+molecular-potential landscape, `g_theta` controls source-sink population change,
+and `w` is the particle mass. These dynamics induce the population equation:
 
 ```text
-state x = [s, z]
-
-ds/dt      = vθ(s, z, t)
-dz/dt      = -∇z Φθ(s, z, t)
-d log w/dt = gθ(s, z, t)
+partial_t rho + div_s(rho v_theta)
+              - div_z(rho grad_z Phi_theta) = g_theta rho
 ```
 
-where `s` is the spatial coordinate, `z` is a gene-expression embedding, and
-`w` is the learned mass/abundance weight.
+The implementation uses six hidden layers of width 128 for the spatial and
+molecular-potential branches, a three-hidden-layer growth branch, ReLU
+activations, bidirectional fitting across the observed time series, Adam
+optimization, and fixed-step RK4 integration by default. Spatial and molecular
+features are standardized separately, and the standardized spatial component is
+weighted by `3.0` in the default data configuration. Analysis-specific loss
+weights should be chosen for each dataset rather than treated as universal.
 
-Training defaults to the SpaPOT Hybrid full time-grid objective:
-one forward rollout from the first slice and one backward rollout from the last
-slice are matched to every observed slice with optimal transport. The matching
-cost combines spatial and gene-latent distances, growth is regularized by a weak
-cell-number ratio term, and the signed WFR/action integral is added in the same
-style as the original Hybrid training loop. Feature scaling is disabled by
-default so the model trains on the raw concatenated `[spatial, latent]` state.
-The model architecture is fixed as the Hybrid branch used by the reference
-figures: direct spatial velocity MLP, gene-latent potential-gradient MLP, and a
-three-hidden-layer growth MLP. The spatial and gene-potential branches use
-`ModelConfig.n_hidden`; the growth branch is intentionally fixed to the original
-three hidden layers.
-SpaPOT Hybrid sampling uses Python `random.sample` under the configured seed.
-The default optimizer is Adam with weight decay
-`1e-5`, and gradient clipping is disabled by default.
-Evaluation in SpaPOT Hybrid mode uses the spatiotemporal classifier on
-`[spatial, latent, time]` rather than the newer latent-only classifier. An
-endpoint/action mode remains available for ablation, but it is no longer the
-default. Optional cell-type grouped matching, spatial velocity smoothness, and
-HJ/HJB regularization are available but disabled by default. Rollout is performed
-with `torchdiffeq.odeint`; the default method is fixed-step `rk4` for
-reproducibility, while adaptive methods such as `dopri5` can be used for
-sensitivity checks.
-
-Install:
+## Installation
 
 ```bash
+git clone https://github.com/wanghongye200211/stCTD.git
+cd stCTD
 pip install -e .
 ```
 
-Minimal model use:
+Python 3.9 or later is required.
+
+## Minimal API
 
 ```python
-from spapot import ModelConfig, SpaPOTPotentialModel
+from stctd import ModelConfig, STCTDModel
 
-model = SpaPOTPotentialModel(ModelConfig())
+model = STCTDModel(ModelConfig())
 ```
 
 Training and evaluation helpers are available from submodules:
 
 ```python
-from spapot.train import train_spapot_model
-from spapot.evaluate import evaluate_spapot_model
+from stctd.train import train_stctd_model
+from stctd.evaluate import evaluate_stctd_model
 ```
 
-SpaPOT Hybrid training entry point:
+## Input Data
+
+The training entry point expects an AnnData file containing the following
+fields unless alternative keys are supplied:
+
+| AnnData field | Default key | Meaning |
+| --- | --- | --- |
+| `obsm` | `X_spatial_input` | Two-dimensional aligned tissue coordinates |
+| `obsm` | `X_gene_input` | Graph-informed molecular latent state |
+| `obs` | `time_input` | Model time used for integration |
+| `obs` | `time` | Original experimental time |
+| `obs` | `Annotation` | Cell or spot annotation |
+| `layers` | `lognorm` | Normalized expression used for downstream readouts |
+
+The model reconstructs population-level dynamics between independently sampled
+specimens; it does not claim to track the same physical cells across time.
+
+## Training
 
 ```bash
-python examples/train_spapot_hybrid.py \
+python examples/train_stctd.py \
   --input-h5ad path/to/prepared_spatial_latent.h5ad \
-  --out-dir runs/spapot_hybrid \
+  --out-dir runs/stctd \
   --device auto
 ```
 
-This entry point is dataset-neutral. It exposes the model-level SpaPOT Hybrid
-configuration: `spapot_fullgrid`, raw unscaled state, `sample_size=1024`,
-sample-size growth every 100 epochs, `lambda_match=4e5`, no endpoint
-`lambda_action` term, no default gradient clipping, and the original
-`[spatial, latent, time]` classifier for
-predicted labels. Dataset restrictions are explicit input choices, not hidden
-model behavior. For example, to require an input AnnData to contain only injured
-cells, add:
+The default `stctd_fullgrid` objective propagates particles forward from the
+earliest observed stage and backward from the latest observed stage, matching
+both trajectories to all sampled stages. Optional endpoint, spatial-coherence,
+cell-type-prior, and first-order Hamilton-Jacobi terms are exposed for controlled
+ablation or analysis-specific configurations.
 
-```bash
---require-obs-value inj_uninj inj
-```
-
-Main package:
+Useful options include:
 
 ```text
-src/spapot/
+--spatial-weight 3.0
+--scale-features / --no-scale-features
+--lambda-hj FLOAT
+--velocity-parameterization potential|vector
+--require-obs-value KEY VALUE
 ```
 
-Model provenance:
+`potential` is the manuscript model. `vector` is retained only as a direct
+gene-velocity ablation and cannot use the Hamilton-Jacobi loss.
+
+## Outputs
+
+Each run writes:
 
 ```text
-docs/model_provenance.md
+config.json
+summary.json
+stctd_vs_baseline_metrics.csv
+checkpoints/model.pt
+checkpoints/training_trace.jsonl
+predicted/*.h5ad
+comparisons/*.png
 ```
 
-Optional checkpoint-level equivalence audit:
-
-```bash
-python tools/audit_spapot_hybrid_equivalence.py \
-  --reference-src path/to/reference/src \
-  --checkpoint path/to/reference_hybrid_model.pth
-```
-
-Embedding helpers:
+## Repository Layout
 
 ```text
-src/embedding/
+src/stctd/                 Core model, training, integration, and evaluation
+src/embedding/             Graph-informed molecular embedding helpers
+examples/train_stctd.py    Dataset-neutral training entry point
+tests/test_stctd_model.py  Architecture and behavior regression tests
+docs/model_provenance.md   Checkpoint and figure provenance notes
+tools/audit_stctd_equivalence.py
+                           Optional checkpoint-level equivalence audit
 ```
 
 The repository is source-only by design. Data matrices, trained checkpoints,
-intermediate AnnData files, and generated figures are kept outside the public
-package.
+intermediate AnnData files, and generated manuscript figures are not bundled.
+
+## Interpretation Boundary
+
+The current transition score is evaluated along a trajectory reconstructed from
+the full observed time series. It therefore supports retrospective localization
+of transition-sensitive intervals. Strict prospective early warning requires a
+separate past-only training and held-out future validation design.

@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from .config import DataConfig, TrainConfig
 from .data import PreparedData
-from .fields import SpaPOTPotentialModel
-from .integrator import rollout_spapot_potential
+from .fields import STCTDModel
+from .integrator import rollout_stctd
 from .latent_classifier import LatentClassifierConfig, TrainedLatentClassifier, predict_latent_labels, train_latent_classifier
 from .spatiotemporal_classifier import create_spatiotemporal_classifier
 from embedding.preprocessing.ae_checkpoint import decode_gene_latent, load_frozen_decoder
@@ -154,7 +154,7 @@ def _plot_real_pred(real: ad.AnnData, pred: ad.AnnData, path: Path, title: str, 
 
 
 def _predict_state(
-    model: SpaPOTPotentialModel,
+    model: STCTDModel,
     data: PreparedData,
     train_config: TrainConfig,
     target_index: int,
@@ -172,11 +172,11 @@ def _predict_state(
             stop = min(start + chunk_size, state0.shape[0])
             state0_chunk = state0[start:stop]
             logw0 = torch.zeros(state0_chunk.shape[0], 1, dtype=state0_chunk.dtype, device=state0_chunk.device)
-            if str(getattr(train_config, "loss_mode", "")).lower() == "spapot_fullgrid":
+            if str(getattr(train_config, "loss_mode", "")).lower() == "stctd_fullgrid":
                 steps = max(1, int(math.ceil(abs(float(data.time_values[target_index] - data.time_values[0])) / float(train_config.ode_step_size))))
             else:
                 steps = max(1, train_config.steps_per_interval * target_index)
-            state, logw, _, _ = rollout_spapot_potential(
+            state, logw, _, _ = rollout_stctd(
                 model,
                 state0_chunk,
                 logw0,
@@ -229,7 +229,7 @@ def _spatiotemporal_labels(
     return np.asarray(labels, dtype=object)
 
 
-def _train_spapot_spatiotemporal_classifier(
+def _train_stctd_spatiotemporal_classifier(
     data: PreparedData,
     data_config: DataConfig,
     output_dir: Path,
@@ -300,7 +300,7 @@ def _build_pred_adata(
                     torch.mps.empty_cache() if device.type == "mps" else torch.cuda.empty_cache()
         decoded = np.vstack(decoded_chunks).astype(np.float32)
     pred = ad.AnnData(X=sp.csr_matrix(decoded), var=data.adata.var.copy())
-    pred.obs_names = [f"spapot_pred_{data.raw_time_values[target_index]:g}_{i}" for i in range(pred.n_obs)]
+    pred.obs_names = [f"stctd_pred_{data.raw_time_values[target_index]:g}_{i}" for i in range(pred.n_obs)]
     pred.obs[data_config.annotation_key] = pd.Categorical(labels, categories=data.adata.obs[data_config.annotation_key].cat.categories)
     pred.obs[data_config.raw_time_key] = float(data.raw_time_values[target_index])
     pred.obs[data_config.time_key] = float(data.time_values[target_index])
@@ -314,8 +314,8 @@ def _build_pred_adata(
     return pred
 
 
-def evaluate_spapot_model(
-    model: SpaPOTPotentialModel,
+def evaluate_stctd_model(
+    model: STCTDModel,
     data: PreparedData,
     decoder_checkpoint: Path | None,
     train_config: TrainConfig,
@@ -329,13 +329,13 @@ def evaluate_spapot_model(
     pred_dir.mkdir(exist_ok=True)
     comparison_dir.mkdir(exist_ok=True)
     decoder = load_decoder_runtime(decoder_checkpoint, data.state_by_time[0].device) if decoder_checkpoint is not None else None
-    label_source = "spatiotemporal_classifier" if str(getattr(train_config, "loss_mode", "")).lower() == "spapot_fullgrid" else "latent_z_classifier"
+    label_source = "spatiotemporal_classifier" if str(getattr(train_config, "loss_mode", "")).lower() == "stctd_fullgrid" else "latent_z_classifier"
     latent_classifier = None
     st_classifier = None
     st_label_map = None
     st_classifier_path = None
     if label_source == "spatiotemporal_classifier":
-        st_classifier, st_label_map, st_classifier_path = _train_spapot_spatiotemporal_classifier(data, data_config, output_dir)
+        st_classifier, st_label_map, st_classifier_path = _train_stctd_spatiotemporal_classifier(data, data_config, output_dir)
     else:
         latent_classifier = train_latent_classifier(
             data,
@@ -372,7 +372,7 @@ def evaluate_spapot_model(
         row.update(_label_metrics(real, pred, data_config.annotation_key))
         row.update(_spatial_metrics(real, pred, data_config.annotation_key, data_config.spatial_key))
         plot_path = comparison_dir / f"{suffix}_real_vs_pred.png"
-        _plot_real_pred(real, pred, plot_path, f"SpaPOT E{raw_time:g}", data_config.annotation_key, data_config.spatial_key)
+        _plot_real_pred(real, pred, plot_path, f"stCTD E{raw_time:g}", data_config.annotation_key, data_config.spatial_key)
         row["compare_png"] = str(plot_path)
         metrics.append(row)
         expected_ratio = data.state_by_time[target_index].shape[0] / data.state_by_time[0].shape[0]

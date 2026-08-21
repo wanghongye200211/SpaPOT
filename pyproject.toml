@@ -3,10 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "spapot"
-version = "0.1.0"
-description = "Spatial Potential Optimal Transport for spatial transcriptomic trajectory reconstruction."
+name = "stctd"
+version = "0.2.0"
+description = "Generative reconstruction of spatial transcriptomic dynamics and critical-transition localization."
+readme = "README.md"
 requires-python = ">=3.9"
+authors = [
+  { name = "wanghongye200211" },
+]
 dependencies = [
   "anndata",
   "h5py",
@@ -22,3 +26,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.urls]
+Homepage = "https://wanghongye200211.github.io/stCTDcover/"
+Repository = "https://github.com/wanghongye200211/stCTD"

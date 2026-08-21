@@ -9,8 +9,8 @@ from torchdiffeq import odeint
 
 from .config import ModelConfig, TrainConfig
 from .data import PreparedData, SampledSlice, sample_slice
-from .fields import SpaPOTPotentialModel
-from .integrator import SpaPOTPotentialODE, rollout_spapot_potential
+from .fields import STCTDModel
+from .integrator import STCTDODE, rollout_stctd
 from .losses import grouped_joint_emd_loss, growth_ratio_penalty, weighted_joint_emd_loss
 from .utils import append_jsonl, clear_cache, seed_all
 
@@ -25,7 +25,7 @@ def _neighbor_index(source: SampledSlice, spatial_dim: int, n_neighbors: int) ->
 
 
 def _rollout(
-    model: SpaPOTPotentialModel,
+    model: STCTDModel,
     source: SampledSlice,
     target_time: float,
     train_config: TrainConfig,
@@ -34,7 +34,7 @@ def _rollout(
     neighbor_index: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     logw0 = torch.zeros(source.state.shape[0], 1, dtype=source.state.dtype, device=source.state.device)
-    return rollout_spapot_potential(
+    return rollout_stctd(
         model,
         source.state,
         logw0,
@@ -50,7 +50,7 @@ def _rollout(
 
 
 def _endpoint_term(
-    model: SpaPOTPotentialModel,
+    model: STCTDModel,
     data: PreparedData,
     source: SampledSlice,
     source_index: int,
@@ -135,7 +135,9 @@ def _hj_config(train_config: TrainConfig) -> tuple[float, int, int]:
     return float(lambda_hj), int(hj_start_epoch), int(hj_ramp_epochs)
 
 
-def _hj_loss(model: SpaPOTPotentialModel, data: PreparedData, train_config: TrainConfig, sample_size: int | None = None) -> torch.Tensor:
+def _hj_loss(model: STCTDModel, data: PreparedData, train_config: TrainConfig, sample_size: int | None = None) -> torch.Tensor:
+    if str(getattr(model, "velocity_parameterization", "potential")).lower() != "potential":
+        raise ValueError("HJ loss requires potential-driven molecular dynamics; disable lambda_hj for vector ablations.")
     rows = []
     for time_index, time_value in enumerate(data.time_values):
         sampled = sample_slice(data, time_index, int(sample_size or train_config.sample_size))
@@ -149,7 +151,7 @@ def _hj_loss(model: SpaPOTPotentialModel, data: PreparedData, train_config: Trai
     return torch.stack(rows).mean()
 
 
-def _make_optimizer(model: SpaPOTPotentialModel, train_config: TrainConfig) -> torch.optim.Optimizer:
+def _make_optimizer(model: STCTDModel, train_config: TrainConfig) -> torch.optim.Optimizer:
     optimizer_name = str(getattr(train_config, "optimizer", "adam")).lower()
     kwargs = {"lr": train_config.lr, "weight_decay": train_config.weight_decay}
     if optimizer_name == "adamw":
@@ -160,7 +162,7 @@ def _make_optimizer(model: SpaPOTPotentialModel, train_config: TrainConfig) -> t
 
 
 def _rollout_time_grid(
-    model: SpaPOTPotentialModel,
+    model: STCTDModel,
     state0: torch.Tensor,
     time_values: list[float],
     train_config: TrainConfig,
@@ -174,7 +176,7 @@ def _rollout_time_grid(
     if method not in {"dopri5", "rk4", "euler", "midpoint"}:
         raise ValueError(f"Unsupported torchdiffeq method: {method}")
     direction_sign = 1.0 if float(time_values[-1]) >= float(time_values[0]) else -1.0
-    ode_func = SpaPOTPotentialODE(
+    ode_func = STCTDODE(
         model,
         alpha_exp=train_config.alpha_exp,
         alpha_gro=train_config.alpha_gro if train_config.use_growth else 0.0,
@@ -197,7 +199,7 @@ def _rollout_time_grid(
     )
 
 
-def _spapot_weighted_match(
+def _stctd_weighted_match(
     pred_state: torch.Tensor,
     target_state: torch.Tensor,
     pred_logw: torch.Tensor,
@@ -220,17 +222,17 @@ def _spapot_weighted_match(
     return match_loss, ot_loss, growth_ratio, pred_weights.mean().detach()
 
 
-def _spapot_fullgrid_loss(
-    model: SpaPOTPotentialModel,
+def _stctd_fullgrid_loss(
+    model: STCTDModel,
     data: PreparedData,
     train_config: TrainConfig,
     *,
     sample_size: int,
 ) -> dict[str, Any]:
     if train_config.use_cell_type_prior:
-        raise ValueError("spapot_fullgrid currently supports the no-prior SpaPOT Hybrid training path only.")
+        raise ValueError("stctd_fullgrid currently supports the no-prior training path only.")
     if float(train_config.lambda_ssp) > 0:
-        raise ValueError("spapot_fullgrid does not support SSP loss; use loss_mode='endpoint' for SSP ablations.")
+        raise ValueError("stctd_fullgrid does not support SSP loss; use loss_mode='endpoint' for SSP ablations.")
 
     n_times = len(data.time_values)
     first_index = 0
@@ -263,7 +265,7 @@ def _spapot_fullgrid_loss(
         target_count = int(data.state_by_time[target_index].shape[0])
         if target_index > first_index:
             expected_ratio = target_count / max(first_count, 1)
-            match_loss, ot_loss, growth_loss, pred_ratio = _spapot_weighted_match(
+            match_loss, ot_loss, growth_loss, pred_ratio = _stctd_weighted_match(
                 forward_state[target_index],
                 target.state,
                 forward_logw[target_index],
@@ -289,7 +291,7 @@ def _spapot_fullgrid_loss(
         if target_index < last_index and train_config.use_bidirectional:
             back_index = last_index - target_index
             expected_ratio = target_count / max(last_count, 1)
-            match_loss, ot_loss, growth_loss, pred_ratio = _spapot_weighted_match(
+            match_loss, ot_loss, growth_loss, pred_ratio = _stctd_weighted_match(
                 backward_state[back_index],
                 target.state,
                 backward_logw[back_index],
@@ -330,30 +332,30 @@ def _spapot_fullgrid_loss(
     }
 
 
-def train_spapot_model(
+def train_stctd_model(
     data: PreparedData,
     decoder_checkpoint: Path | None,
     model_config: ModelConfig,
     train_config: TrainConfig,
     *,
     output_dir: Path,
-) -> tuple[SpaPOTPotentialModel, dict[str, Any]]:
+) -> tuple[STCTDModel, dict[str, Any]]:
     seed_all(train_config.seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     trace_path = output_dir / "training_trace.jsonl"
     if trace_path.exists():
         trace_path.unlink()
     device = data.state_by_time[0].device
-    model = SpaPOTPotentialModel(model_config).to(device)
+    model = STCTDModel(model_config).to(device)
     optimizer = _make_optimizer(model, train_config)
     started = time.time()
     n_times = len(data.time_values)
     if n_times <= 1:
         raise ValueError("Need at least two time points.")
 
-    loss_mode = str(getattr(train_config, "loss_mode", "spapot_fullgrid")).lower()
-    if loss_mode not in {"spapot_fullgrid", "endpoint"}:
-        raise ValueError("loss_mode must be 'spapot_fullgrid' or 'endpoint'.")
+    loss_mode = str(getattr(train_config, "loss_mode", "stctd_fullgrid")).lower()
+    if loss_mode not in {"stctd_fullgrid", "endpoint"}:
+        raise ValueError("loss_mode must be 'stctd_fullgrid' or 'endpoint'.")
     effective_sample_size = int(train_config.sample_size)
     first_index = 0
     last_index = n_times - 1
@@ -361,8 +363,8 @@ def train_spapot_model(
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
-        if loss_mode == "spapot_fullgrid":
-            loss_payload = _spapot_fullgrid_loss(
+        if loss_mode == "stctd_fullgrid":
+            loss_payload = _stctd_fullgrid_loss(
                 model,
                 data,
                 train_config,
@@ -422,7 +424,7 @@ def train_spapot_model(
         lambda_hj, hj_start_epoch, hj_ramp_epochs = _hj_config(train_config)
         hj_scale = _ramped_weight(lambda_hj, epoch, hj_start_epoch, hj_ramp_epochs)
         hj_loss = _hj_loss(model, data, train_config, effective_sample_size) if hj_scale > 0 else data.state_by_time[0].new_zeros(())
-        if loss_mode == "spapot_fullgrid":
+        if loss_mode == "stctd_fullgrid":
             total_loss = float(train_config.lambda_match) * match_loss + action_loss + float(hj_scale) * hj_loss
         else:
             total_loss = (
@@ -482,7 +484,7 @@ def train_spapot_model(
 
     checkpoint_path = output_dir / "model.pt"
     checkpoint = {
-        "model_type": "spapot_hybrid",
+        "model_type": "stctd",
         "dynamics_equation": "dsdt=v(s,z,t); dzdt=-grad_z Phi(s,z,t); dlogwdt=g(s,z,t)",
         "model_config": model_config.to_json_dict(),
         "train_config": train_config.to_json_dict(),

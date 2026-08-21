@@ -1,31 +1,125 @@
-# Model Provenance
+# Model and Figure Provenance
 
-This repository fixes SpaPOT to the model family that generated the strongest
-current axolotl trajectory figures, rather than treating the figure renderer or a
-dataset-specific example as the model.
+This document separates the canonical stCTD implementation from historical run
+and checkpoint identifiers. Renderer names do not define the model; the model
+configuration, checkpoint, and run summary do.
 
-## Reference Figure Result
+## Canonical stCTD Model
 
-The paper-style trajectory GIF was rendered from:
+For joint state `x = [s, z]`, stCTD uses:
 
 ```text
-result_figures/axolotl_artista_injured_adjacent_aligned_direct_ae_hybrid_hj_compare/nohj_lam0_e1000_s1024_samplegrowth
+ds/dt      = v_theta(s, z, t)
+dz/dt      = -grad_z Phi_theta(s, z, t)
+d log w/dt = g_theta(s, z, t)
 ```
 
-The render report identifies the same run directory, the
-`trajectory_visual_concepts_step0p2_paper_model_allsource` trajectory cache, 91
-frames from 2.0 to 20.0, and `inj_uninj_counts = {"inj": 22820}`. The renderer
-did not define the model.
-
-## Reference Model
-
-The run summary identifies:
+The corresponding population equation is:
 
 ```text
-model_family: SpaPOT Hybrid
+partial_t rho + div_s(rho v_theta)
+              - div_z(rho grad_z Phi_theta) = g_theta rho
+```
+
+The manuscript model therefore has three coupled fields:
+
+```text
+spatial branch:             direct spatial-velocity MLP
+molecular branch:           scalar-potential MLP with -grad_z Phi output
+source-sink growth branch:  scalar growth MLP
+```
+
+The direct molecular-vector option in the code is an ablation, not the
+manuscript model.
+
+## Architecture
+
+The reference checkpoints use:
+
+```text
+spatial_dim: 2
+latent_dim: 10
+hidden_dim: 128
+activation: ReLU
+spatial branch: 6 hidden layers
+molecular-potential branch: 6 hidden layers
+growth branch: 3 hidden layers
+```
+
+Observed checkpoint parameter shapes are:
+
+```text
+spatial_velocity_net:
+  hidden linears: (128, 13), then five (128, 128), output (2, 128)
+molecular-potential net:
+  hidden linears: (128, 13), then five (128, 128), scalar output (1, 128)
+growth_rate_net:
+  hidden linears: (128, 13), (128, 128), (128, 128), output (1, 128)
+```
+
+The growth branch intentionally remains three layers deep even when the spatial
+and molecular-potential branches use six hidden layers.
+
+## Training Configuration
+
+The public defaults follow the manuscript implementation:
+
+```text
+feature preprocessing: standardize spatial and molecular features separately
+spatial weight: 3.0 after standardization
+training direction: bidirectional across the full observed time series
+epochs: 1000
+optimizer: Adam
+learning rate: 1e-3
+weight decay: 1e-5
+gradient clipping: disabled
+ODE solver: fixed-step RK4
+default RK4 step size: 0.25
+```
+
+The matching, dynamic, physical, and optional spatial loss weights are
+analysis-specific. The physical term is a first-order Hamilton-Jacobi constraint
+on the molecular-potential field; it is not a diffusion-control HJB equation.
+
+The default full-grid objective propagates particles from the earliest stage
+forward to all observed stages and from the latest stage backward to all
+observed stages. Generated and observed distributions are matched at the sampled
+times while the trajectory action and source-sink behavior are regularized.
+
+## Final Figure 5 Reference
+
+The current final axolotl Figure 5 panels and trajectory animation were rendered
+from the HJ-regularized run recorded at:
+
+```text
+result_figures/axolotl_artista_preprocessed_injured_direct_ae_hybrid_hjb/e1000_s1024_lamhjb10_samplegrowth
+```
+
+The matching animation report is:
+
+```text
+result_figures/蝾螈/trajectory_b_panel/gif_hjb_previous_fixed_dt0p1/render_report.json
+```
+
+It records 181 frames from 2.0 to 20.0 DPI at `raw_dt = 0.1`.
+
+These paths retain historical internal names because they are immutable
+provenance identifiers. Their relevant fields map to current terminology as
+follows:
+
+```text
+legacy velocity_parameterization = "hybrid"  -> current "potential"
+legacy lambda_hjb                          -> current lambda_hj
+legacy hybrid_model.pth                    -> stCTD potential-model checkpoint
+```
+
+The recorded reference configuration includes:
+
+```text
+model_family: stCTD
 model_path: save_model/hybrid_model.pth
 velocity_parameterization: hybrid
-lambda_hjb: 0.0
+lambda_hjb: 10.0
 n_epochs: 1000
 num_samples: [1204, 1204, 1204, 1204, 1204]
 seed: 19491001
@@ -39,76 +133,25 @@ ode_step_size: 0.25
 use_alignment: false
 ```
 
-The reference checkpoint uses `velocity_parameterization = "hybrid"`,
-`spatial_dim = 2`, `gene_dim = 10`, and `hidden_dim = 128`.
-
-Observed checkpoint parameter shapes:
+An older no-HJ rendering remains available for comparison but is not the source
+for the current final Figure 5:
 
 ```text
-spatial_velocity_net:
-  hidden linears: (128, 13), then five (128, 128), output (2, 128)
-gene_velocity_net:
-  hidden linears: (128, 13), then five (128, 128), scalar output (1, 128)
-growth_rate_net:
-  hidden linears: (128, 13), (128, 128), (128, 128), output (1, 128)
+result_figures/axolotl_artista_injured_adjacent_aligned_direct_ae_hybrid_hj_compare/nohj_lam0_e1000_s1024_samplegrowth
 ```
 
-## Fixed Model Family
+## Checkpoint Equivalence Audit
 
-SpaPOT therefore uses this fixed model family:
-
-```text
-state = [spatial, latent]
-ds/dt = spatial MLP([t, state])
-dz/dt = -grad_z U([t, state])
-dlogw/dt = growth MLP([t, state])
-```
-
-Architecture details:
-
-```text
-spatial branch: n_hidden MLP layers, output spatial_dim
-gene branch: n_hidden scalar-potential MLP layers, output -grad_z U
-growth branch: fixed 3 hidden MLP layers, output 1
-```
-
-The fixed 3-layer growth branch is important: the reference SpaPOT Hybrid
-checkpoint used three hidden layers for growth even when the spatial and gene
-branches used `n_hiddens = 6`.
-
-## Training Objective
-
-The reference objective is not endpoint mean plus positive action regularization.
-It is full forward/backward time-grid matching:
-
-```text
-forward rollout: first observed slice -> all observed time points
-backward rollout: last observed slice -> all observed time points
-loss = lambda_match * sum(OT + growth-ratio penalty)
-       + signed forward/backward WFR action
-       + optional HJ regularizer
-```
-
-Feature scaling is off by default, so training uses the raw concatenated
-`[spatial, latent]` state. The label readout in SpaPOT Hybrid mode is the
-spatiotemporal classifier on `[spatial, latent, time]`.
-
-SpaPOT Hybrid training also preserves non-architectural details that affect the learned
-trajectory: Python `random.sample` slice sampling under the configured seed,
-Adam with weight decay `1e-5`, no gradient clipping by default, fixed-step RK4
-with `ode_step_size = 0.25`, and sample-size growth by +20 every 100 epochs.
-
-## Equivalence Audit
-
-The optional audit script below loads a reference Hybrid checkpoint, maps its
-weights into the SpaPOT Hybrid model, and compares `ds/dt`, `dz/dt`, and
-`dlogw/dt` on random probe states:
+The optional audit maps the historical checkpoint weights into `STCTDModel` and
+compares spatial velocity, molecular velocity, and growth on random probe states:
 
 ```bash
-python tools/audit_spapot_hybrid_equivalence.py \
+python tools/audit_stctd_equivalence.py \
   --reference-src path/to/reference/src \
   --checkpoint path/to/reference_hybrid_model.pth
 ```
 
-For the reference checkpoint above, the observed max absolute velocity and
-growth differences are both `0.0` after weight mapping.
+Both the no-HJ checkpoint and the Figure 5 HJ-regularized checkpoint produced
+zero maximum absolute differences after weight mapping for spatial velocity,
+molecular velocity, and growth. The HJ term changes the training objective, not
+the core potential-driven architecture.

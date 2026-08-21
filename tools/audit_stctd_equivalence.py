@@ -14,16 +14,16 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from spapot.config import ModelConfig  # noqa: E402
-from spapot.fields import SpaPOTPotentialModel  # noqa: E402
+from stctd.config import ModelConfig  # noqa: E402
+from stctd.fields import STCTDModel  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Audit functional equivalence between a reference Hybrid checkpoint and the SpaPOT Hybrid model."
+        description="Audit functional equivalence between a historical trajectory checkpoint and STCTDModel."
     )
     parser.add_argument("--reference-src", type=Path, required=True, help="Path to the reference source directory needed to load the checkpoint.")
-    parser.add_argument("--checkpoint", type=Path, required=True, help="Torch-saved reference Hybrid model checkpoint.")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Torch-saved historical trajectory-model checkpoint.")
     parser.add_argument("--spatial-dim", type=int, default=2)
     parser.add_argument("--latent-dim", type=int, default=10)
     parser.add_argument("--hidden-dim", type=int, default=128)
@@ -36,15 +36,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _copy_modulelist(old_branch: torch.nn.Module, new_seq: torch.nn.Sequential, n_hidden: int) -> None:
+def _copy_modulelist(old_branch: torch.nn.Module, new_branch: torch.nn.Module, n_hidden: int) -> None:
     for i in range(n_hidden):
-        new_seq[2 * i].weight.data.copy_(old_branch.net[i][0].weight.data)
-        new_seq[2 * i].bias.data.copy_(old_branch.net[i][0].bias.data)
-    new_seq[2 * n_hidden].weight.data.copy_(old_branch.out.weight.data)
-    new_seq[2 * n_hidden].bias.data.copy_(old_branch.out.bias.data)
+        new_branch.net[i][0].weight.data.copy_(old_branch.net[i][0].weight.data)
+        new_branch.net[i][0].bias.data.copy_(old_branch.net[i][0].bias.data)
+    new_branch.out.weight.data.copy_(old_branch.out.weight.data)
+    new_branch.out.bias.data.copy_(old_branch.out.bias.data)
 
 
-def _copy_growth(old_seq: torch.nn.Sequential, new_seq: torch.nn.Sequential) -> None:
+def _copy_growth(old_seq: torch.nn.Sequential, new_branch: torch.nn.Module) -> None:
+    new_seq = new_branch.net
     for old_i, new_i in zip([0, 2, 4, 6], [0, 2, 4, 6]):
         new_seq[new_i].weight.data.copy_(old_seq[old_i].weight.data)
         new_seq[new_i].bias.data.copy_(old_seq[old_i].bias.data)
@@ -58,7 +59,7 @@ def main() -> None:
 
     old_model = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     old_model.eval()
-    new_model = SpaPOTPotentialModel(
+    new_model = STCTDModel(
         ModelConfig(
             spatial_dim=int(args.spatial_dim),
             latent_dim=int(args.latent_dim),

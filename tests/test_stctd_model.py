@@ -15,18 +15,18 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from spapot.config import ModelConfig, TrainConfig  # noqa: E402
-from spapot.data import FeatureScaler, PreparedData, sample_slice  # noqa: E402
-from spapot.fields import SpaPOTPotentialModel, make_mlp  # noqa: E402
+from stctd.config import DataConfig, ModelConfig, TrainConfig  # noqa: E402
+from stctd.data import FeatureScaler, PreparedData, sample_slice  # noqa: E402
+from stctd.fields import STCTDModel, make_mlp  # noqa: E402
 
 
 def _linear_layers(module: nn.Module) -> list[nn.Linear]:
     return [layer for layer in module.modules() if isinstance(layer, nn.Linear)]
 
 
-class SpaPOTHybridModelTest(unittest.TestCase):
+class STCTDModelTest(unittest.TestCase):
     def test_reference_branch_shapes_are_fixed(self) -> None:
-        model = SpaPOTPotentialModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=128, n_hidden=6))
+        model = STCTDModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=128, n_hidden=6))
 
         spatial_layers = _linear_layers(model.spatial_net)
         self.assertEqual(len(spatial_layers), 7)
@@ -44,14 +44,33 @@ class SpaPOTHybridModelTest(unittest.TestCase):
         self.assertEqual(growth_layers[-1].weight.shape, torch.Size([1, 128]))
 
     def test_growth_branch_does_not_follow_n_hidden(self) -> None:
-        model = SpaPOTPotentialModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=64, n_hidden=2))
+        model = STCTDModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=64, n_hidden=2))
         self.assertEqual(len(_linear_layers(model.spatial_net)), 3)
         self.assertEqual(len(_linear_layers(model.potential_net)), 3)
         self.assertEqual(len(_linear_layers(model.growth_net)), 4)
 
+    def test_vector_parameterization_is_an_explicit_ablation(self) -> None:
+        model = STCTDModel(
+            ModelConfig(
+                spatial_dim=2,
+                latent_dim=3,
+                hidden_dim=16,
+                n_hidden=2,
+                velocity_parameterization="vector",
+            )
+        )
+        state = torch.randn(5, 5)
+        velocity, growth, auxiliary = model(0.5, state)
+
+        self.assertEqual(velocity.shape, torch.Size([5, 5]))
+        self.assertEqual(growth.shape, torch.Size([5, 1]))
+        self.assertTrue(torch.equal(auxiliary["potential"], torch.zeros(5, 1)))
+        with self.assertRaisesRegex(ValueError, "no scalar gene potential"):
+            model.potential(0.5, state[:, 2:], state[:, :2])
+
     def test_seeded_branch_initialization_order_is_stable(self) -> None:
         torch.manual_seed(19491001)
-        model = SpaPOTPotentialModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=128, n_hidden=6))
+        model = STCTDModel(ModelConfig(spatial_dim=2, latent_dim=10, hidden_dim=128, n_hidden=6))
 
         spatial_sum = float(_linear_layers(model.spatial_net)[0].weight.detach().sum())
         potential_sum = float(_linear_layers(model.potential_net)[0].weight.detach().sum())
@@ -61,9 +80,9 @@ class SpaPOTHybridModelTest(unittest.TestCase):
         self.assertAlmostEqual(potential_sum, -4.505341529846191, places=6)
         self.assertAlmostEqual(growth_sum, 8.79880142211914, places=6)
 
-    def test_defaults_are_spapot_fullgrid(self) -> None:
+    def test_defaults_match_manuscript_model(self) -> None:
         config = TrainConfig()
-        self.assertEqual(config.loss_mode, "spapot_fullgrid")
+        self.assertEqual(config.loss_mode, "stctd_fullgrid")
         self.assertEqual(config.optimizer, "adam")
         self.assertEqual(config.sample_size, 1024)
         self.assertEqual(config.lambda_match, 400000.0)
@@ -72,6 +91,17 @@ class SpaPOTHybridModelTest(unittest.TestCase):
         self.assertTrue(config.increase_sample_size)
         self.assertEqual(config.sample_growth_interval, 100)
         self.assertEqual(config.sample_growth_step, 20)
+
+        model_config = ModelConfig()
+        self.assertEqual(model_config.velocity_parameterization, "potential")
+
+        data_config = DataConfig(
+            input_h5ad=Path("input.h5ad"),
+            network_tsv=Path("network.tsv"),
+            gat_out_dir=Path("embedding"),
+        )
+        self.assertTrue(data_config.scale_features)
+        self.assertEqual(data_config.spatial_weight, 3.0)
 
     def test_leakyrelu_matches_torch_default(self) -> None:
         mlp = make_mlp(3, 1, 8, 1, "leakyrelu")

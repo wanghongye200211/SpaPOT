@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, random_split
 
 
 class MLPNetWork(nn.Module):
-    """SpaPOT classifier over [spatial, latent, time]."""
+    """stCTD classifier over [spatial, latent, time]."""
 
     def __init__(self, spatial_dim: int = 2, input_gene_dim: int = 10, output_dim: int = 24) -> None:
         super().__init__()
@@ -164,7 +164,7 @@ def create_spatiotemporal_classifier(
     early_stop: int = 50,
     seed: int = 19491001,
 ) -> dict[int, str]:
-    """Train the SpaPOT spatiotemporal cell-type readout."""
+    """Train the stCTD spatiotemporal cell-type readout."""
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
